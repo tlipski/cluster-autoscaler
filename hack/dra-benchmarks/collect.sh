@@ -36,9 +36,10 @@ SUMMARY="$RESULTS_DIR/summary.txt"
 for label in $labels; do
   b="$RESULTS_DIR/$label-baseline.txt"
   c="$RESULTS_DIR/$label-candidate.txt"
-  # A suite with no results on either side is not worth a benchstat error.
-  if [[ ! -s "$b" || ! -s "$c" ]]; then
-    log "skipping '$label' - missing results on one side"
+  # An empty block means the suite did not run - a malformed SUITE entry or a
+  # regex that matched nothing. Say so rather than quietly omitting it.
+  if ! grep -q '^Benchmark' "$b" 2>/dev/null || ! grep -q '^Benchmark' "$c" 2>/dev/null; then
+    log "WARNING: '$label' produced no benchmark results on one or both sides - check the regex and the SUITE syntax"
     continue
   fi
   {

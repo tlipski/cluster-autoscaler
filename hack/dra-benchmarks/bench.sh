@@ -23,16 +23,20 @@ WORKDIR="${WORKDIR:-/workspace}"
 export GOMAXPROCS="${GOMAXPROCS:-8}"
 export GOFLAGS="${GOFLAGS:--mod=mod}"
 
-# Each entry is: <label>|<package>|<bench regex>|<benchtime>|<count>
+# Each entry is: <label>;<package>;<bench regex>;<benchtime>;<count>
+#
+# Semicolon rather than pipe, because a bench regex may itself contain '|' for
+# alternation - which silently shifted every field when '|' was the separator.
 # RunOnceScaleDownDRA gets more samples because it is bimodal - at 6 samples it
 # does not reach significance even with a large mean difference.
 DEFAULT_SUITE="\
-loop|./pkg/core/bench/|BenchmarkRunOnce|1x|6
-scaledowndra|./pkg/core/bench/|BenchmarkRunOnceScaleDownDRA|1x|10
-dra|./pkg/estimator/|BenchmarkBinpackingEstimateDRA|3x|6
-profiles|./pkg/estimator/|BenchmarkBinpackingEstimateDRAProfiles|2x|6
-nodra|./pkg/estimator/|BenchmarkBinpackingEstimate\$|2x|6
-store|./pkg/simulator/clustersnapshot/store/|.|50x|6"
+loop;./pkg/core/bench/;BenchmarkRunOnce;1x;6
+scaledowndra;./pkg/core/bench/;BenchmarkRunOnceScaleDownDRA;1x;10
+dra;./pkg/estimator/;BenchmarkBinpackingEstimateDRA;3x;6
+profiles;./pkg/estimator/;BenchmarkBinpackingEstimateDRAProfiles;2x;6
+nodra;./pkg/estimator/;BenchmarkBinpackingEstimate\$;2x;6
+adverse;./pkg/simulator/dynamicresources/snapshot/;BenchmarkAllocatedState|BenchmarkSnapshotForkRevertNoDRA;200x;6
+store;./pkg/simulator/clustersnapshot/store/;.;50x;6"
 
 SUITE="${SUITE:-$DEFAULT_SUITE}"
 
@@ -55,8 +59,12 @@ run_side() {
   # Warm the build cache so compilation is not attributed to the first benchmark.
   go build ./pkg/... >/dev/null 2>&1 || true
 
-  while IFS='|' read -r label pkg regex benchtime count; do
+  while IFS=';' read -r label pkg regex benchtime count extra; do
     [[ -z "${label:-}" ]] && continue
+    if [[ -z "${count:-}" || -n "${extra:-}" ]]; then
+      echo "[bench] malformed SUITE entry: $label" >&2
+      exit 1
+    fi
     log "  $label: $pkg $regex (benchtime=$benchtime count=$count)"
     echo "###BEGIN ${side} ${label}###"
     # -run '^$' skips tests; only benchmarks execute.

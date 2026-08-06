@@ -1,3 +1,4 @@
 # Raw per-run output. results/summary.txt from a reference run is committed
 # separately as RESULTS.md.
 results/
+results-adverse/

@@ -52,6 +52,45 @@ coordinating over one device. This goes through a different snapshot path than
 pod-owned claims: `ReservePodClaims` on an existing claim rather than
 `AddClaims` of a new one.
 
+## Where the maintained state costs more
+
+Every profile above is a case the incremental tracker is good at. Two further
+groups exist so the suite can also say where it is not, because a benchmark set
+that only contains favourable cases is not evidence.
+
+`BenchmarkBinpackingEstimateDRAProfiles/noGain/*` are large clusters where the
+change should still buy little:
+
+- **`manyClaimsFewPods`** - 12k claims but three pending pods. The tracker is
+  built once and read about as many times as recomputing would have walked.
+- **`existingUnallocated`** - claims present but unallocated. Deriving from them
+  returns immediately on a nil allocation, so the walk being removed was nearly
+  free to begin with.
+- **`draFleetNonDraPods`** - a DRA fleet whose pending pods use no DRA. The
+  scheduler's DRA PreFilter short-circuits for pods without claims, so the
+  allocated state is never requested at all.
+
+`BenchmarkAllocatedState*` in the snapshot package go further and target the
+cases where the tracker is outright slower. It trades work on writes for work on
+reads, so it loses whenever writes outnumber reads, whenever the claim set is
+small enough that recomputing was already trivial, or whenever the state is read
+once and discarded:
+
+- **`SingleRead`** - build, read once, throw away. The tracker does the same walk
+  as recomputing *plus* records what every claim contributed, for a second read
+  that never comes.
+- **`WriteHeavy`** - many claim writes against one read, inverting the ratio the
+  design assumes.
+- **`ForkRevertChurn`** - Fork/Revert in a loop with no reads. Reverting makes the
+  tracker re-read the claims the dropped layer touched, where recomputing would
+  simply have invalidated and rebuilt lazily - and with no read, never rebuilt.
+- **`SnapshotForkRevertNoDRA`** - a snapshot that never touches DRA, guarding
+  against the machinery leaking cost into clusters that do not use the feature.
+
+Measured results for these are in RESULTS.md. They are genuinely negative, and
+the point of keeping them is that the trade is then explicit rather than
+implied.
+
 ## Deliberately not covered
 
 - **Time-slicing.** Configured through `.spec.devices.config` rather than the

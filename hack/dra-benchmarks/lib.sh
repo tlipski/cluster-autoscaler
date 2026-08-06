@@ -14,8 +14,8 @@ NODE_POOL="${NODE_POOL:-default-pool}"
 REPO="${REPO:-https://github.com/<owner>/cluster-autoscaler.git}"
 # Baseline is the commit that adds the benchmarks but not the fix, so both
 # sides run byte-identical measurement code.
-BASELINE_REF="${BASELINE_REF:-ae77a96}"
-CANDIDATE_REF="${CANDIDATE_REF:-4123c81}"
+BASELINE_REF="${BASELINE_REF:-4064b26}"
+CANDIDATE_REF="${CANDIDATE_REF:-2e5e38a}"
 
 # --- pod sizing ------------------------------------------------------------
 # Requests equal limits so the pod is Guaranteed QoS. CPU is set well above

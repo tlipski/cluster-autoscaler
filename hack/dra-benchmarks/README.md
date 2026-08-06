@@ -43,8 +43,8 @@ Everything is an environment variable with a default in `lib.sh`:
 | `CLUSTER` / `LOCATION` | `my-bench-cluster` / `<zone-or-region>` | cluster to run on |
 | `NODE_POOL` | `default-pool` | pool to scale |
 | `REPO` | the public fork | repository to benchmark |
-| `BASELINE_REF` | `ae77a96` | "before" commit |
-| `CANDIDATE_REF` | `4123c81` | "after" commit |
+| `BASELINE_REF` | `4064b26` | "before" commit |
+| `CANDIDATE_REF` | `2e5e38a` | "after" commit |
 | `BENCH_CPU` / `BENCH_MEMORY` | `16` / `64Gi` | pod size, requests == limits |
 | `BENCH_GOMAXPROCS` | `8` | cores the benchmark itself may use |
 | `NAMESPACE` | `dra-bench` | created if absent |
@@ -67,16 +67,17 @@ REPO=https://github.com/someone/cluster-autoscaler.git \
 
 Both sides must run **identical benchmark code**, otherwise the comparison
 measures the benchmark rather than the change. The defaults satisfy this: the
-branch is ordered so `ae77a96` adds the benchmarks and `4123c81` adds the fix,
-and `git diff ae77a96 4123c81` touches no benchmark file. If your branch is not
+branch is ordered so `4064b26` adds the benchmarks and `2e5e38a` adds the fix,
+and `git diff 4064b26 2e5e38a` touches no benchmark file. If your branch is not
 arranged that way, cherry-pick the benchmarks onto the baseline first.
 
 ### Choosing the suite
 
-`SUITE` is one `label|package|regex|benchtime|count` entry per line:
+`SUITE` is one `label;package;regex;benchtime;count` entry per line (semicolon
+separated, so a regex may contain `|`):
 
 ```bash
-SUITE="dra|./pkg/estimator/|BenchmarkBinpackingEstimateDRA|3x|6" ./run.sh
+SUITE="dra;./pkg/estimator/;BenchmarkBinpackingEstimateDRA;3x;6" ./run.sh
 ```
 
 Each label becomes its own pair of result files and its own `benchstat` table.
