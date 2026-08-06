@@ -364,8 +364,10 @@ func (s *Snapshot) findPodClaims(pod *apiv1.Pod, ignoreNotTracked bool) ([]*reso
 		return nil, nil
 	}
 
-	result := make([]*resourceapi.ResourceClaim, len(pod.Spec.ResourceClaims))
-	for claimIndex, claimRef := range pod.Spec.ResourceClaims {
+	// Appended to rather than indexed by claimIndex: with ignoreNotTracked the loop skips
+	// entries, and indexing would leave nil holes in the result for callers to trip over.
+	result := make([]*resourceapi.ResourceClaim, 0, len(pod.Spec.ResourceClaims))
+	for _, claimRef := range pod.Spec.ResourceClaims {
 		claimName := claimRefToName(pod, claimRef)
 		if claimName == "" {
 			if !ignoreNotTracked {
@@ -395,7 +397,7 @@ func (s *Snapshot) findPodClaims(pod *apiv1.Pod, ignoreNotTracked bool) ([]*reso
 			continue
 		}
 
-		result[claimIndex] = claim
+		result = append(result, claim)
 	}
 
 	return result, nil
