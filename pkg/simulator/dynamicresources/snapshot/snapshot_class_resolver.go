@@ -29,10 +29,15 @@ type snapshotDeviceClassResolver struct {
 
 var _ schedulerinterface.DeviceClassResolver = &snapshotDeviceClassResolver{}
 
-// newSnapshotDeviceClassResolver implements DeviceClassResolver for a snapshot
+// newSnapshotDeviceClassResolver implements DeviceClassResolver for a snapshot.
+//
+// This walks every DeviceClass in the snapshot, so callers should reuse the result rather than
+// building a resolver per lookup - see Snapshot.DeviceClassResolver.
 func newSnapshotDeviceClassResolver(snapshot *Snapshot) schedulerinterface.DeviceClassResolver {
-	deviceClassMap := make(map[v1.ResourceName]*resourceapi.DeviceClass)
-	for _, class := range snapshot.listDeviceClasses() {
+	classes := snapshot.listDeviceClasses()
+	// Every class contributes at least its own prefixed name, and possibly an extended resource name.
+	deviceClassMap := make(map[v1.ResourceName]*resourceapi.DeviceClass, len(classes))
+	for _, class := range classes {
 		if class != nil {
 			deviceClassMap[v1.ResourceName(resourceapi.ResourceDeviceClassPrefix+class.Name)] = class
 			extendedResourceName := class.Spec.ExtendedResourceName
@@ -41,11 +46,11 @@ func newSnapshotDeviceClassResolver(snapshot *Snapshot) schedulerinterface.Devic
 			}
 		}
 	}
-	return snapshotDeviceClassResolver{deviceClassMap: deviceClassMap}
+	return &snapshotDeviceClassResolver{deviceClassMap: deviceClassMap}
 }
 
 // GetDeviceClass returns the device class name for the given extended resource name
-func (s snapshotDeviceClassResolver) GetDeviceClass(resourceName v1.ResourceName) *resourceapi.DeviceClass {
+func (s *snapshotDeviceClassResolver) GetDeviceClass(resourceName v1.ResourceName) *resourceapi.DeviceClass {
 	class, ok := s.deviceClassMap[resourceName]
 	if !ok {
 		return nil
