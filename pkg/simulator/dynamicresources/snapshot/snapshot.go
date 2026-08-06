@@ -48,6 +48,15 @@ type Snapshot struct {
 	resourceSlices *common.PatchSet[string, []*resourceapi.ResourceSlice]
 	deviceClasses  *common.PatchSet[string, *resourceapi.DeviceClass]
 
+	// deviceClassResolver is derived from deviceClasses and built on first use.
+	//
+	// The DeviceClasses in a Snapshot are set once at construction and never
+	// modified afterwards - the Snapshot exposes no way to add, update or remove
+	// one, and Fork/Commit/Revert only stack empty layers on top of them. The
+	// resolver can therefore be reused for the whole lifetime of the Snapshot.
+	// Anything that starts modifying deviceClasses has to reset this field.
+	deviceClassResolver schedulerinterface.DeviceClassResolver
+
 	// allocatedState is derived from resourceClaims and maintained as they change, so
 	// that the scheduler can be answered without walking every claim on every attempt.
 	// Access it through allocationTracker(), never directly - a Snapshot can be built as
@@ -143,8 +152,14 @@ func (s *Snapshot) DeviceClasses() schedulerinterface.DeviceClassLister {
 
 // DeviceClassResolver exposes the Snapshot as schedulerinterface.DeviceClassResolver, in order to interact with
 // the scheduler framework.
+//
+// The scheduler asks for a resolver on every PreFilter, so the result is built once and reused - see the
+// deviceClassResolver field for why that is safe.
 func (s *Snapshot) DeviceClassResolver() schedulerinterface.DeviceClassResolver {
-	return newSnapshotDeviceClassResolver(s)
+	if s.deviceClassResolver == nil {
+		s.deviceClassResolver = newSnapshotDeviceClassResolver(s)
+	}
+	return s.deviceClassResolver
 }
 
 // AddClaims adds additional ResourceClaims to the Snapshot. It can be used e.g. if we need to duplicate a Pod that
