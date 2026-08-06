@@ -47,7 +47,7 @@ func referenceAllocatedState(snapshot *Snapshot, enabledConsumableCapacity bool)
 	sharedDeviceIDs := sets.New[structured.SharedDeviceID]()
 	capacity := structured.NewConsumedCapacityCollection()
 
-	snapshot.walkResourceClaims(func(claim *resourceapi.ResourceClaim) bool {
+	snapshot.WalkResourceClaims(func(claim *resourceapi.ResourceClaim) bool {
 		foreachAllocatedDevice(claim,
 			func(deviceID structured.DeviceID) { devices.Insert(deviceID) },
 			enabledConsumableCapacity,

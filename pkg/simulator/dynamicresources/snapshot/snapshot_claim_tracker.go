@@ -33,7 +33,13 @@ type snapshotClaimTracker struct {
 }
 
 func (ct snapshotClaimTracker) List() ([]*resourceapi.ResourceClaim, error) {
-	return ct.snapshot.listResourceClaims(), nil
+	capacity := ct.snapshot.resourceClaims.Len()
+	result := make([]*resourceapi.ResourceClaim, 0, capacity)
+	ct.snapshot.WalkResourceClaims(func(claim *resourceapi.ResourceClaim) bool {
+		result = append(result, claim)
+		return true
+	})
+	return result, nil
 }
 
 func (ct snapshotClaimTracker) Get(namespace, claimName string) (*resourceapi.ResourceClaim, error) {
@@ -52,7 +58,7 @@ func (ct snapshotClaimTracker) Get(namespace, claimName string) (*resourceapi.Re
 // until the next change to the snapshot's ResourceClaims.
 func (ct snapshotClaimTracker) ListAllAllocatedDevices() (sets.Set[structured.DeviceID], error) {
 	tracker := ct.snapshot.allocationTracker()
-	tracker.ensureBuilt(ct.snapshot.walkResourceClaims)
+	tracker.ensureBuilt(ct.snapshot.WalkResourceClaims)
 	return tracker.allDevices.set, nil
 }
 
@@ -66,7 +72,7 @@ func (ct snapshotClaimTracker) ListAllAllocatedDevices() (sets.Set[structured.De
 // ResourceClaims.
 func (ct snapshotClaimTracker) GatherAllocatedState() (*structured.AllocatedState, error) {
 	tracker := ct.snapshot.allocationTracker()
-	tracker.ensureBuilt(ct.snapshot.walkResourceClaims)
+	tracker.ensureBuilt(ct.snapshot.WalkResourceClaims)
 
 	state := tracker.allocatedState()
 	if !utilfeature.DefaultFeatureGate.Enabled(features.DRAConsumableCapacity) {
@@ -128,38 +134,6 @@ func (ct snapshotClaimTracker) AssumedClaimRestore(namespace, claimName string) 
 	panic("snapshotClaimTracker.AssumedClaimRestore() was called - this should never happen")
 }
 
-// foreachAllocatedDevice invokes the provided callback for each
-// device in the claim's allocation result which was allocated
-// exclusively for the claim.
-//
-// This method is a fork of a corresponding scheduler logic
-func foreachAllocatedDevice(claim *resourceapi.ResourceClaim,
-	dedicatedDeviceCallback func(deviceID structured.DeviceID),
-	enabledConsumableCapacity bool,
-	sharedDeviceCallback func(structured.SharedDeviceID),
-	consumedCapacityCallback func(structured.DeviceConsumedCapacity)) {
-	forEachAllocatedResult(claim, func(deviceID structured.DeviceID, result *resourceapi.DeviceRequestAllocationResult) {
-
-		// Execute sharedDeviceCallback and consumedCapacityCallback correspondingly
-		// if DRAConsumableCapacity feature is enabled
-		if enabledConsumableCapacity {
-			shared := result.ShareID != nil
-			if shared {
-				sharedDeviceID := structured.MakeSharedDeviceID(deviceID, result.ShareID)
-				sharedDeviceCallback(sharedDeviceID)
-				if result.ConsumedCapacity != nil {
-					deviceConsumedCapacity := structured.NewDeviceConsumedCapacity(deviceID, result.ConsumedCapacity)
-					consumedCapacityCallback(deviceConsumedCapacity)
-				}
-				return
-			}
-		}
-
-		// Otherwise, execute dedicatedDeviceCallback
-		dedicatedDeviceCallback(deviceID)
-	})
-}
-
 // forEachAllocatedResult invokes the provided callback for each allocation result in the
 // claim that counts as consuming its device, along with the DeviceID derived from it.
 //
@@ -181,4 +155,35 @@ func forEachAllocatedResult(claim *resourceapi.ResourceClaim, callback func(stru
 		}
 		callback(structured.MakeDeviceID(result.Driver, result.Pool, result.Device), result)
 	}
+}
+
+// foreachAllocatedDevice invokes the provided callback for each
+// device in the claim's allocation result which was allocated
+// exclusively for the claim.
+//
+// This method is a fork of a corresponding scheduler logic
+func foreachAllocatedDevice(claim *resourceapi.ResourceClaim,
+	dedicatedDeviceCallback func(deviceID structured.DeviceID),
+	enabledConsumableCapacity bool,
+	sharedDeviceCallback func(structured.SharedDeviceID),
+	consumedCapacityCallback func(structured.DeviceConsumedCapacity)) {
+	forEachAllocatedResult(claim, func(deviceID structured.DeviceID, result *resourceapi.DeviceRequestAllocationResult) {
+		// Execute sharedDeviceCallback and consumedCapacityCallback correspondingly
+		// if DRAConsumableCapacity feature is enabled
+		if enabledConsumableCapacity {
+			shared := result.ShareID != nil
+			if shared {
+				sharedDeviceID := structured.MakeSharedDeviceID(deviceID, result.ShareID)
+				sharedDeviceCallback(sharedDeviceID)
+				if result.ConsumedCapacity != nil {
+					deviceConsumedCapacity := structured.NewDeviceConsumedCapacity(deviceID, result.ConsumedCapacity)
+					consumedCapacityCallback(deviceConsumedCapacity)
+				}
+				return
+			}
+		}
+
+		// Otherwise, execute dedicatedDeviceCallback
+		dedicatedDeviceCallback(deviceID)
+	})
 }

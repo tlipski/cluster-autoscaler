@@ -26,5 +26,13 @@ type snapshotSliceLister struct {
 
 // TODO(DRA): Actually handle the taint rules.
 func (sl snapshotSliceLister) ListWithDeviceTaintRules() ([]*resourceapi.ResourceSlice, error) {
-	return sl.snapshot.listResourceSlices(), nil
+	// resourceSlices is keyed by node, so Len() only bounds the number of nodes
+	// holding slices. It is a lower bound on the result size, enough to avoid the
+	// first few growths of the slice.
+	result := make([]*resourceapi.ResourceSlice, 0, sl.snapshot.resourceSlices.Len())
+	sl.snapshot.WalkResourceSlices(func(slices []*resourceapi.ResourceSlice) bool {
+		result = append(result, slices...)
+		return true
+	})
+	return result, nil
 }

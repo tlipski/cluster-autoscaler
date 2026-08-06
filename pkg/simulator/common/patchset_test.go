@@ -537,54 +537,80 @@ func TestPatchSetOperations(t *testing.T) {
 
 func TestPatchSetCache(t *testing.T) {
 	tests := map[string]struct {
-		patchLayers     []map[string]*int
-		mutatePatchSet  func(ps *PatchSet[string, int])
-		wantCache       map[string]*int
-		wantCacheInSync bool
+		patchLayers      []map[string]*int
+		mutatePatchSet   func(ps *PatchSet[string, int])
+		wantCache        map[string]int
+		wantDeletedCache map[string]struct{}
+		wantCacheInSync  bool
 	}{
 		"Initial_EmptyPatchSet": {
-			patchLayers:     []map[string]*int{},
-			mutatePatchSet:  func(ps *PatchSet[string, int]) {},
-			wantCache:       map[string]*int{},
-			wantCacheInSync: false,
+			patchLayers:      []map[string]*int{},
+			mutatePatchSet:   func(ps *PatchSet[string, int]) {},
+			wantCache:        map[string]int{},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  false,
 		},
 		"Initial_WithData_NoCacheAccess": {
-			patchLayers:     []map[string]*int{{"a": ptr.To(1)}},
-			mutatePatchSet:  func(ps *PatchSet[string, int]) {},
-			wantCache:       map[string]*int{},
-			wantCacheInSync: false,
+			patchLayers:      []map[string]*int{{"a": ptr.To(1)}},
+			mutatePatchSet:   func(ps *PatchSet[string, int]) {},
+			wantCache:        map[string]int{},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  false,
 		},
 		"FindValue_PopulatesCacheForKey": {
 			patchLayers: []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2)}},
 			mutatePatchSet: func(ps *PatchSet[string, int]) {
 				ps.FindValue("a")
 			},
-			wantCache:       map[string]*int{"a": ptr.To(1)},
-			wantCacheInSync: false,
+			wantCache:        map[string]int{"a": 1},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  false,
 		},
-		"FindValue_DeletedKey_PopulatesCacheWithNil": {
+		"FindValue_DeletedKey_PopulatesDeletedCache": {
 			patchLayers: []map[string]*int{{"a": nil, "b": ptr.To(2)}},
 			mutatePatchSet: func(ps *PatchSet[string, int]) {
 				ps.FindValue("a")
 			},
-			wantCache:       map[string]*int{"a": nil},
-			wantCacheInSync: false,
+			wantCache:        map[string]int{},
+			wantDeletedCache: map[string]struct{}{"a": {}},
+			wantCacheInSync:  false,
+		},
+		"FindValue_UnknownKey_PopulatesDeletedCache": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.FindValue("missing")
+			},
+			wantCache:        map[string]int{},
+			wantDeletedCache: map[string]struct{}{"missing": {}},
+			wantCacheInSync:  false,
+		},
+		"FindValue_UnknownKey_OnSyncedCache_SkipsDeletedCache": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.AsMap()
+				ps.FindValue("missing")
+			},
+			wantCache:        map[string]int{"a": 1},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  true,
 		},
 		"AsMap_PopulatesAndSyncsCache": {
 			patchLayers: []map[string]*int{{"a": ptr.To(1), "b": nil, "c": ptr.To(3)}},
 			mutatePatchSet: func(ps *PatchSet[string, int]) {
 				ps.AsMap()
 			},
-			wantCache:       map[string]*int{"a": ptr.To(1), "c": ptr.To(3)}, // Cache does not necessarily track deletions like 'b' key
-			wantCacheInSync: true,
+			wantCache:        map[string]int{"a": 1, "c": 3},
+			wantDeletedCache: map[string]struct{}{"b": {}},
+			wantCacheInSync:  true,
 		},
 		"SetCurrent_UpdatesCache_NewKey": {
 			patchLayers: []map[string]*int{{}},
 			mutatePatchSet: func(ps *PatchSet[string, int]) {
 				ps.SetCurrent("x", 10)
 			},
-			wantCache:       map[string]*int{"x": ptr.To(10)},
-			wantCacheInSync: false,
+			wantCache:        map[string]int{"x": 10},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  false,
 		},
 		"SetCurrent_UpdatesCache_OverwriteKey": {
 			patchLayers: []map[string]*int{{"x": ptr.To(5)}},
@@ -592,27 +618,50 @@ func TestPatchSetCache(t *testing.T) {
 				ps.FindValue("x")
 				ps.SetCurrent("x", 10)
 			},
-			wantCache:       map[string]*int{"x": ptr.To(10)},
-			wantCacheInSync: false,
+			wantCache:        map[string]int{"x": 10},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  false,
 		},
-		"DeleteCurrent_UpdatesCache": {
+		"SetCurrent_ClearsDeletedCacheEntry": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.FindValue("missing")
+				ps.SetCurrent("missing", 10)
+			},
+			wantCache:        map[string]int{"missing": 10},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  false,
+		},
+		"DeleteCurrent_RemovesFromCache": {
 			patchLayers: []map[string]*int{{"x": ptr.To(5)}},
 			mutatePatchSet: func(ps *PatchSet[string, int]) {
 				ps.FindValue("x")
 				ps.DeleteCurrent("x")
 			},
-			wantCache:       map[string]*int{"x": nil},
-			wantCacheInSync: false,
+			wantCache:        map[string]int{},
+			wantDeletedCache: map[string]struct{}{"x": {}},
+			wantCacheInSync:  false,
 		},
 		"Revert_ClearsAffectedCacheEntries_And_SetsCacheNotInSync": {
-			patchLayers: []map[string]*int{{"a": ptr.To(1)}, {"b": ptr.To(2), "a": ptr.To(11)}}, // Layer 0: a=1; Layer 1: b=2, a=11
+			patchLayers: []map[string]*int{{"a": ptr.To(1)}, {"b": ptr.To(2), "a": ptr.To(11)}},
 			mutatePatchSet: func(ps *PatchSet[string, int]) {
 				ps.FindValue("a")
 				ps.FindValue("b")
 				ps.Revert()
 			},
-			wantCache:       map[string]*int{},
-			wantCacheInSync: false,
+			wantCache:        map[string]int{},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  false,
+		},
+		"Revert_ClearsDeletedCacheEntriesOfRevertedLayer": {
+			patchLayers: []map[string]*int{{"x": ptr.To(5)}, {"x": nil}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.FindValue("x")
+				ps.Revert()
+			},
+			wantCache:        map[string]int{},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  false,
 		},
 		"Revert_OnSyncedCache_SetsCacheNotInSync": {
 			patchLayers: []map[string]*int{{"a": ptr.To(1)}, {"b": ptr.To(2)}},
@@ -620,8 +669,29 @@ func TestPatchSetCache(t *testing.T) {
 				ps.AsMap()
 				ps.Revert()
 			},
-			wantCache:       map[string]*int{"a": ptr.To(1)},
-			wantCacheInSync: false,
+			wantCache:        map[string]int{"a": 1},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  false,
+		},
+		"Revert_EmptyTopLayer_KeepsCacheInSync": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1)}, {}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.AsMap()
+				ps.Revert()
+			},
+			wantCache:        map[string]int{"a": 1},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  true,
+		},
+		"Revert_EmptyTopLayer_KeepsDeletedCacheInSync": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1), "b": nil}, {}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.AsMap()
+				ps.Revert()
+			},
+			wantCache:        map[string]int{"a": 1},
+			wantDeletedCache: map[string]struct{}{"b": {}},
+			wantCacheInSync:  true,
 		},
 		"Commit_DoesNotInvalidateCache_IfValuesConsistent": {
 			patchLayers: []map[string]*int{{"a": ptr.To(1)}, {"b": ptr.To(2)}},
@@ -630,8 +700,9 @@ func TestPatchSetCache(t *testing.T) {
 				ps.FindValue("b")
 				ps.Commit()
 			},
-			wantCache:       map[string]*int{"a": ptr.To(1), "b": ptr.To(2)},
-			wantCacheInSync: false,
+			wantCache:        map[string]int{"a": 1, "b": 2},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  false,
 		},
 		"Commit_OnSyncedCache_KeepsCacheInSync": {
 			patchLayers: []map[string]*int{{"a": ptr.To(1)}, {"b": ptr.To(2)}},
@@ -639,8 +710,9 @@ func TestPatchSetCache(t *testing.T) {
 				ps.AsMap()
 				ps.Commit()
 			},
-			wantCache:       map[string]*int{"a": ptr.To(1), "b": ptr.To(2)},
-			wantCacheInSync: true,
+			wantCache:        map[string]int{"a": 1, "b": 2},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  true,
 		},
 		"Fork_DoesNotInvalidateCache": {
 			patchLayers: []map[string]*int{{"a": ptr.To(1)}},
@@ -648,8 +720,9 @@ func TestPatchSetCache(t *testing.T) {
 				ps.FindValue("a")
 				ps.Fork()
 			},
-			wantCache:       map[string]*int{"a": ptr.To(1)},
-			wantCacheInSync: false,
+			wantCache:        map[string]int{"a": 1},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  false,
 		},
 		"Fork_OnSyncedCache_KeepsCacheInSync": {
 			patchLayers: []map[string]*int{{"a": ptr.To(1)}},
@@ -657,8 +730,9 @@ func TestPatchSetCache(t *testing.T) {
 				ps.AsMap()
 				ps.Fork()
 			},
-			wantCache:       map[string]*int{"a": ptr.To(1)},
-			wantCacheInSync: true,
+			wantCache:        map[string]int{"a": 1},
+			wantDeletedCache: map[string]struct{}{},
+			wantCacheInSync:  true,
 		},
 	}
 
@@ -667,16 +741,12 @@ func TestPatchSetCache(t *testing.T) {
 			ps := buildTestPatchSet(t, tc.patchLayers)
 			tc.mutatePatchSet(ps)
 
-			if !maps.EqualFunc(ps.cache, tc.wantCache, func(a, b *int) bool {
-				if a == nil && b == nil {
-					return true
-				}
-				if a == nil || b == nil {
-					return false
-				}
-				return *a == *b
-			}) {
+			if !maps.Equal(ps.cache, tc.wantCache) {
 				t.Errorf("Cache content mismatch: got %v, want %v", ps.cache, tc.wantCache)
+			}
+
+			if !maps.Equal(ps.deletedCache, tc.wantDeletedCache) {
+				t.Errorf("Deleted cache content mismatch: got %v, want %v", ps.deletedCache, tc.wantDeletedCache)
 			}
 
 			if ps.cacheInSync != tc.wantCacheInSync {
@@ -684,6 +754,148 @@ func TestPatchSetCache(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPatchSetNegativeCacheInvalidation exercises the negative cache through the
+// public API only. A key recorded as absent has to stop being reported as absent
+// as soon as any layer provides a value for it again, whether that happens by
+// setting it, by reverting the layer that deleted it, or by a cache rebuild.
+func TestPatchSetNegativeCacheInvalidation(t *testing.T) {
+	tests := map[string]struct {
+		patchLayers    []map[string]*int
+		mutatePatchSet func(ps *PatchSet[string, int])
+		key            string
+		wantValue      int
+		wantFound      bool
+	}{
+		"SetCurrent_AfterMissingLookup": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.FindValue("x")
+				ps.SetCurrent("x", 9)
+			},
+			key:       "x",
+			wantValue: 9,
+			wantFound: true,
+		},
+		"SetCurrent_AfterDeleteCurrent": {
+			patchLayers: []map[string]*int{{"x": ptr.To(5)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.DeleteCurrent("x")
+				ps.FindValue("x")
+				ps.SetCurrent("x", 7)
+			},
+			key:       "x",
+			wantValue: 7,
+			wantFound: true,
+		},
+		"Revert_RestoresKeyDeletedInRevertedLayer": {
+			patchLayers: []map[string]*int{{"x": ptr.To(5)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.Fork()
+				ps.DeleteCurrent("x")
+				ps.FindValue("x")
+				ps.Revert()
+			},
+			key:       "x",
+			wantValue: 5,
+			wantFound: true,
+		},
+		"Revert_RestoresKeyDeletedBeforeCacheRebuild": {
+			patchLayers: []map[string]*int{{"x": ptr.To(5)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.Fork()
+				ps.DeleteCurrent("x")
+				ps.Len()
+				ps.Revert()
+			},
+			key:       "x",
+			wantValue: 5,
+			wantFound: true,
+		},
+		"Revert_DropsKeyAddedInRevertedLayer": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.FindValue("x")
+				ps.Fork()
+				ps.SetCurrent("x", 9)
+				ps.Revert()
+			},
+			key:       "x",
+			wantFound: false,
+		},
+		"Commit_KeepsKeyAddedAfterMissingLookup": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.FindValue("x")
+				ps.Fork()
+				ps.SetCurrent("x", 9)
+				ps.Commit()
+			},
+			key:       "x",
+			wantValue: 9,
+			wantFound: true,
+		},
+		"SyncedCache_ReportsDeletedKeyAsMissing": {
+			patchLayers: []map[string]*int{{"x": ptr.To(5)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.Fork()
+				ps.DeleteCurrent("x")
+				ps.Len()
+			},
+			key:       "x",
+			wantFound: false,
+		},
+		"SyncedCache_ThenSetCurrent": {
+			patchLayers: []map[string]*int{{"a": ptr.To(1)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.Len()
+				ps.FindValue("x")
+				ps.SetCurrent("x", 9)
+			},
+			key:       "x",
+			wantValue: 9,
+			wantFound: true,
+		},
+		"DeleteCurrent_AfterFoundLookup": {
+			patchLayers: []map[string]*int{{"x": ptr.To(5)}},
+			mutatePatchSet: func(ps *PatchSet[string, int]) {
+				ps.FindValue("x")
+				ps.DeleteCurrent("x")
+			},
+			key:       "x",
+			wantFound: false,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			ps := buildTestPatchSet(t, tc.patchLayers)
+			tc.mutatePatchSet(ps)
+
+			gotValue, gotFound := ps.FindValue(tc.key)
+			if gotFound != tc.wantFound || gotValue != tc.wantValue {
+				t.Errorf("FindValue(%q): got (%v, %v), want (%v, %v)", tc.key, gotValue, gotFound, tc.wantValue, tc.wantFound)
+			}
+
+			// The same answer has to come out of a full rebuild.
+			wantMap := map[string]int{}
+			if tc.wantFound {
+				wantMap[tc.key] = tc.wantValue
+			}
+			if gotMap := ps.AsMap(); !maps.Equal(filterKey(gotMap, tc.key), wantMap) {
+				t.Errorf("AsMap()[%q]: got %v, want %v", tc.key, filterKey(gotMap, tc.key), wantMap)
+			}
+		})
+	}
+}
+
+func filterKey[K comparable, V any](m map[K]V, key K) map[K]V {
+	filtered := map[K]V{}
+	if value, found := m[key]; found {
+		filtered[key] = value
+	}
+	return filtered
 }
 
 func buildTestPatchSet[K comparable, V any](t *testing.T, patchLayers []map[K]*V) *PatchSet[K, V] {

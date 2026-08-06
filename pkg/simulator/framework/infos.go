@@ -137,24 +137,41 @@ func (n *NodeInfo) Snapshot() schedulerinterface.NodeInfo {
 	}
 }
 
-// ResourceClaims returns all ResourceClaims contained in the PodInfos in this NodeInfo. Shared claims
-// are taken into account, each claim should only be returned once.
+// WalkResourceClaims calls f for every ResourceClaim contained in the PodInfos in this
+// NodeInfo, stopping early if f returns false. Shared claims are taken into account, each
+// claim should only be visited once.
 //
-// TODO(DRA): Beware that it may return stale ResourceClaim data.
+// TODO(DRA): Beware that it may visit stale ResourceClaim data.
 // See PodInfo.NeededResourceClaims comment.
-func (n *NodeInfo) ResourceClaims() []*resourceapi.ResourceClaim {
+func (n *NodeInfo) WalkResourceClaims(f func(*resourceapi.ResourceClaim) bool) {
 	processedClaims := map[types.UID]bool{}
-	var result []*resourceapi.ResourceClaim
 	for _, pod := range n.Pods() {
 		for _, claim := range pod.NeededResourceClaims {
 			if processedClaims[claim.UID] {
 				// Shared claim, already grouped.
 				continue
 			}
-			result = append(result, claim)
 			processedClaims[claim.UID] = true
+			if !f(claim) {
+				return
+			}
 		}
 	}
+}
+
+// ResourceClaims returns all ResourceClaims contained in the PodInfos in this NodeInfo. Shared claims
+// are taken into account, each claim should only be returned once.
+//
+// Deprecated: Use WalkResourceClaims to avoid slice allocation.
+//
+// TODO(DRA): Beware that it may return stale ResourceClaim data.
+// See PodInfo.NeededResourceClaims comment.
+func (n *NodeInfo) ResourceClaims() []*resourceapi.ResourceClaim {
+	var result []*resourceapi.ResourceClaim
+	n.WalkResourceClaims(func(claim *resourceapi.ResourceClaim) bool {
+		result = append(result, claim)
+		return true
+	})
 	return result
 }
 
