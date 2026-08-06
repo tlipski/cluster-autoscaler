@@ -25,6 +25,7 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/dynamic-resource-allocation/structured"
 	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/utils/ptr"
 )
 
 type snapshotClaimTracker struct {
@@ -171,6 +172,13 @@ func forEachAllocatedResult(claim *resourceapi.ResourceClaim, callback func(stru
 	}
 	for resultIndex := range claim.Status.Allocation.Devices.Results {
 		result := &claim.Status.Allocation.Devices.Results[resultIndex]
+		if ptr.Deref(result.AdminAccess, false) {
+			// A device granted with admin access is not consumed by the claim, so the
+			// scheduler does not count it as allocated and neither can we - otherwise
+			// CA sees less free capacity than the scheduler does and scales up for
+			// devices that are in fact available.
+			continue
+		}
 		callback(structured.MakeDeviceID(result.Driver, result.Pool, result.Device), result)
 	}
 }

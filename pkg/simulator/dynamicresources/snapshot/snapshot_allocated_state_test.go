@@ -329,3 +329,37 @@ func TestAllocatedStateTrackerDuplicateDevice(t *testing.T) {
 		t.Errorf("device %v should be released once no claim holds it", deviceID)
 	}
 }
+
+// TestAllocatedStateAdminAccessNotAllocated checks that devices granted with admin access are
+// not counted as consumed. The scheduler skips them (see foreachAllocatedDevice in
+// k8s.io/kubernetes/pkg/scheduler/framework/plugins/dynamicresources/allocateddevices.go), so
+// counting them here would make CA see less free capacity than the scheduler does.
+func TestAllocatedStateAdminAccessNotAllocated(t *testing.T) {
+	adminResult := dedicatedResult("driver", "pool", "admin-dev")
+	adminResult.AdminAccess = ptr.To(true)
+
+	claim := allocatedStateTestClaim("default", "admin", allocationForDevices(
+		adminResult,
+		dedicatedResult("driver", "pool", "normal-dev"),
+	))
+	snapshot := NewSnapshot(map[ResourceClaimId]*resourceapi.ResourceClaim{GetClaimId(claim): claim}, nil, nil, nil)
+
+	state, err := snapshot.ResourceClaims().GatherAllocatedState()
+	if err != nil {
+		t.Fatalf("GatherAllocatedState(): %v", err)
+	}
+	if adminDevice := structured.MakeDeviceID("driver", "pool", "admin-dev"); state.AllocatedDevices.Has(adminDevice) {
+		t.Errorf("GatherAllocatedState(): admin access device %v must not count as allocated", adminDevice)
+	}
+	if normalDevice := structured.MakeDeviceID("driver", "pool", "normal-dev"); !state.AllocatedDevices.Has(normalDevice) {
+		t.Errorf("GatherAllocatedState(): device %v should count as allocated", normalDevice)
+	}
+
+	devices, err := snapshot.ResourceClaims().ListAllAllocatedDevices()
+	if err != nil {
+		t.Fatalf("ListAllAllocatedDevices(): %v", err)
+	}
+	if adminDevice := structured.MakeDeviceID("driver", "pool", "admin-dev"); devices.Has(adminDevice) {
+		t.Errorf("ListAllAllocatedDevices(): admin access device %v must not count as allocated", adminDevice)
+	}
+}
