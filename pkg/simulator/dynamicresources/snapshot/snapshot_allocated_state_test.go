@@ -247,12 +247,6 @@ func TestAllocatedStateTrackerRandomizedOperations(t *testing.T) {
 						break
 					}
 				case 4: // remove the pod-owned claim
-					if _, found := snapshot.getResourceClaim(claimId); !found {
-						// findPodClaims returns nil entries for claims that are no longer
-						// tracked, which RemovePodOwnedClaims dereferences. That is fixed
-						// separately - skip the case here rather than depend on it.
-						break
-					}
 					snapshot.RemovePodOwnedClaims(pod)
 				case 5: // re-add a removed claim
 					if _, found := snapshot.getResourceClaim(claimId); found {
