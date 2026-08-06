@@ -30,6 +30,7 @@ DEFAULT_SUITE="\
 loop|./pkg/core/bench/|BenchmarkRunOnce|1x|6
 scaledowndra|./pkg/core/bench/|BenchmarkRunOnceScaleDownDRA|1x|10
 dra|./pkg/estimator/|BenchmarkBinpackingEstimateDRA|3x|6
+profiles|./pkg/estimator/|BenchmarkBinpackingEstimateDRAProfiles|2x|6
 nodra|./pkg/estimator/|BenchmarkBinpackingEstimate\$|2x|6
 store|./pkg/simulator/clustersnapshot/store/|.|50x|6"
 
