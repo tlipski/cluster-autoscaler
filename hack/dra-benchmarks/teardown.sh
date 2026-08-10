@@ -4,6 +4,7 @@
 # a c2d-standard-32 is not cheap to leave idle.
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+require_cluster_config
 
 require gcloud
 

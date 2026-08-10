@@ -6,6 +6,7 @@
 # not something to leave running. teardown.sh puts it back.
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+require_cluster_config
 
 NODES="${NODES:-1}"
 
