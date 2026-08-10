@@ -17,6 +17,36 @@ kubectl --context "$KCTX" get nodes >/dev/null 2>&1 || \
 READY_NODES=$(kubectl --context "$KCTX" get nodes --no-headers 2>/dev/null | grep -c ' Ready ' || true)
 [[ "$READY_NODES" -ge 1 ]] || fail "no Ready nodes - run provision.sh first"
 
+# From here on the pool is known to be up, and it bills until teardown.sh runs.
+# Interrupting this script is easy to do and leaves the node running, so say so
+# on every exit path.
+#
+# Deliberately a warning and not an automatic teardown: the benchmark is a
+# Kubernetes Job and keeps running server-side, so killing this script only
+# stops the log follower. Scaling the pool down here would destroy a run that
+# would otherwise have finished, and its results are recoverable from the pod.
+on_exit() {
+  local rc=$?
+  if [[ $rc -ne 0 ]]; then
+    log "run.sh exited with status $rc - the Job may still be running on the cluster"
+    log "  check:   kubectl --context $KCTX -n $NAMESPACE get job $JOB_NAME"
+    if [[ -n "${POD:-}" ]]; then
+      log "  recover: kubectl --context $KCTX -n $NAMESPACE logs $POD > raw.log && $HERE/collect.sh raw.log"
+    fi
+  fi
+  if [[ "${AUTO_TEARDOWN:-}" == "1" ]]; then
+    log "AUTO_TEARDOWN=1 - scaling the pool down"
+    "$HERE/teardown.sh" || log "teardown FAILED - scale $NODE_POOL down by hand, it is still billing"
+  else
+    log "the node pool is STILL RUNNING and billing - run ./teardown.sh when finished"
+  fi
+  return $rc
+}
+trap on_exit EXIT
+# Route signals through the EXIT trap so an interrupt gets the same warning.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 kubectl --context "$KCTX" get namespace "$NAMESPACE" >/dev/null 2>&1 || {
   log "creating namespace $NAMESPACE"
   kubectl --context "$KCTX" create namespace "$NAMESPACE"

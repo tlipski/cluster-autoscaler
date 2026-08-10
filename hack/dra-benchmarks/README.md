@@ -108,6 +108,26 @@ which is why the default suite gives it 10.
 - **The node pool sits at zero when idle.** A `c2d-standard-32` costs real money
   per hour; `teardown.sh` exists so it is one command to stop paying for it.
 
+- **Interrupting `run.sh` does not stop the benchmark, and does not stop the
+  billing.** The suite runs as a Kubernetes Job, so killing the script only
+  drops the log follower - the Job carries on and its output stays retrievable
+  from the pod. `run.sh` prints the recovery and teardown commands on every
+  non-zero exit, but it will not scale the pool down on its own, because doing
+  so would destroy a run that was going to finish. For unattended runs set
+  `AUTO_TEARDOWN=1` and `run.sh` tears down for you, whatever the outcome:
+
+  ```bash
+  AUTO_TEARDOWN=1 BASELINE_REF=... CANDIDATE_REF=... ./run.sh
+  ```
+
+  To pick up an interrupted run, take the log from the pod and analyse it
+  offline - `collect.sh` needs no cluster configuration at all:
+
+  ```bash
+  kubectl -n dra-bench logs <pod> > results/raw.log
+  ./collect.sh results/raw.log
+  ```
+
 ## Output
 
 ```
