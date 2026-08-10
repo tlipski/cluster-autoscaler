@@ -23,7 +23,16 @@ nothing needs to be built or pushed locally.
 
 ## Usage
 
+`PROJECT`, `CLUSTER`, `LOCATION` and `REPO` have no defaults - every script
+fails immediately if they are unset, rather than billing or benchmarking
+somebody else's. All three scripts need them, so keep them in the environment:
+
 ```bash
+export PROJECT=my-gcp-project
+export CLUSTER=my-bench-cluster
+export LOCATION=<zone-or-region>          # where $CLUSTER lives
+export REPO=https://github.com/<owner>/cluster-autoscaler.git
+
 ./provision.sh    # scale the node pool up (this starts billing)
 ./run.sh          # run both sides, write results/ and print the comparison
 ./teardown.sh     # scale the node pool back to zero
@@ -39,10 +48,10 @@ Everything is an environment variable with a default in `lib.sh`:
 
 | variable | default | meaning |
 |---|---|---|
-| `PROJECT` | `my-gcp-project` | GCP project |
-| `CLUSTER` / `LOCATION` | `my-bench-cluster` / `<zone-or-region>` | cluster to run on |
+| `PROJECT` | **required** | GCP project |
+| `CLUSTER` / `LOCATION` | **required** | cluster to run on, and its zone or region |
 | `NODE_POOL` | `default-pool` | pool to scale |
-| `REPO` | the public fork | repository to benchmark |
+| `REPO` | **required** | publicly cloneable repository holding both refs |
 | `BASELINE_REF` | `4064b26` | "before" commit |
 | `CANDIDATE_REF` | `2e5e38a` | "after" commit |
 | `BENCH_CPU` / `BENCH_MEMORY` | `16` / `64Gi` | pod size, requests == limits |
@@ -59,7 +68,7 @@ BASELINE_REF=abc1234 CANDIDATE_REF=def5678 ./run.sh
 and a different fork:
 
 ```bash
-REPO=https://github.com/someone/cluster-autoscaler.git \
+REPO=https://github.com/<owner>/cluster-autoscaler.git \
   BASELINE_REF=... CANDIDATE_REF=... ./run.sh
 ```
 

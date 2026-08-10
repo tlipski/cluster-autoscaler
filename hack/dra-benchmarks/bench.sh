@@ -11,7 +11,7 @@
 #
 set -euo pipefail
 
-REPO="${REPO:-https://github.com/<owner>/cluster-autoscaler.git}"
+REPO="${REPO:?REPO must be set}"
 BASELINE_REF="${BASELINE_REF:?BASELINE_REF must be set}"
 CANDIDATE_REF="${CANDIDATE_REF:?CANDIDATE_REF must be set}"
 WORKDIR="${WORKDIR:-/workspace}"

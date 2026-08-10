@@ -5,13 +5,17 @@
 set -euo pipefail
 
 # --- cluster ---------------------------------------------------------------
-PROJECT="${PROJECT:-my-gcp-project}"
-CLUSTER="${CLUSTER:-my-bench-cluster}"
-LOCATION="${LOCATION:-<zone-or-region>}"
+# No defaults: which project and cluster to bill and scale is not something to
+# guess at. Export these, or put them in a local env file the harness sources.
+PROJECT="${PROJECT:?PROJECT must be set - the GCP project owning the benchmark cluster}"
+CLUSTER="${CLUSTER:?CLUSTER must be set - the GKE cluster to run the benchmark on}"
+LOCATION="${LOCATION:?LOCATION must be set - the zone or region of \$CLUSTER}"
 NODE_POOL="${NODE_POOL:-default-pool}"
 
 # --- what to benchmark -----------------------------------------------------
-REPO="${REPO:-https://github.com/<owner>/cluster-autoscaler.git}"
+# The pod clones this over the network, so it must be a repository GitHub can
+# serve anonymously - a local checkout is not enough.
+REPO="${REPO:?REPO must be set - a publicly cloneable repository holding both refs}"
 # Baseline is the commit that adds the benchmarks but not the fix, so both
 # sides run byte-identical measurement code.
 BASELINE_REF="${BASELINE_REF:-4064b26}"
