@@ -120,8 +120,25 @@ func BenchmarkBinpackingEstimateDRA(b *testing.B) {
 		claimsPerNode int
 		pendingPods   int
 	}{
+		// Kept for continuity with earlier runs.
 		{"nodes=1000/claims=4000/pendingPods=200", 1000, 4, 200},
+
+		// Pods axis: fleet and allocated claims fixed, pending pods varied. The
+		// allocated state was recomputed once per scheduling attempt, and attempts
+		// scale with pending pods, so this is the axis that sets how much work is
+		// saved in absolute terms.
+		{"nodes=5000/claims=20000/pendingPods=100", 5000, 4, 100},
 		{"nodes=5000/claims=20000/pendingPods=500", 5000, 4, 500},
+		{"nodes=5000/claims=20000/pendingPods=2500", 5000, 4, 2500},
+
+		// Claims axis: fleet and pending pods fixed, allocated claims varied. Each
+		// avoided recompute is a scan over the allocated state, so this is the axis
+		// that sets how much is saved per attempt - and therefore the ratio.
+		//
+		// claimsPerNode is bounded by draBenchmarkDevicesPerNode (8): the allocation
+		// helper maps claim index straight onto gpu-<index>.
+		{"nodes=5000/claims=10000/pendingPods=500", 5000, 2, 500},
+		{"nodes=5000/claims=40000/pendingPods=500", 5000, 8, 500},
 	} {
 		b.Run(scenario.name, func(b *testing.B) {
 			deviceClasses := map[string]*resourceapi.DeviceClass{
