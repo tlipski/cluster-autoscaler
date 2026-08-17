@@ -18,6 +18,7 @@ package kwok
 
 import (
 	apiv1 "k8s.io/api/core/v1"
+	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/client-go/kubernetes"
 	listersv1 "k8s.io/client-go/listers/core/v1"
 
@@ -56,9 +57,15 @@ type NodeGroup struct {
 	kubeClient   kubernetes.Interface
 	lister       kube_util.NodeLister
 	nodeTemplate *apiv1.Node
-	minSize      int
-	targetSize   int
-	maxSize      int
+	// resourceSlices are the DRA ResourceSlice templates advertised by a node of
+	// this group. Empty unless the templates ConfigMap carries a 'resourceSlices'
+	// key. They are handed to TemplateNodeInfo so that scale-up simulation can see
+	// the devices a new node would bring; without them CA cannot place any pod
+	// with a ResourceClaim onto a node this provider would create.
+	resourceSlices []*resourceapi.ResourceSlice
+	minSize        int
+	targetSize     int
+	maxSize        int
 }
 
 // NodegroupsConfig defines options for creating nodegroups
