@@ -12,9 +12,17 @@
 set -euo pipefail
 
 REPO="${REPO:?REPO must be set}"
-BASELINE_REF="${BASELINE_REF:?BASELINE_REF must be set}"
-CANDIDATE_REF="${CANDIDATE_REF:?CANDIDATE_REF must be set}"
 WORKDIR="${WORKDIR:-/workspace}"
+
+# Two refs stays spelled the old way. A stack of more than two is spelled with
+# REFS, one '<side>:<ref>' per line. Every side runs in this one process on this
+# one machine, which is the point: results from separately provisioned nodes are
+# not comparable, so an N-way comparison cannot be N/2 separate two-way runs.
+# Side names build the block markers collect.sh greps for - lowercase only.
+if [[ -z "${REFS:-}" ]]; then
+  REFS="baseline:${BASELINE_REF:?BASELINE_REF or REFS must be set}
+candidate:${CANDIDATE_REF:?CANDIDATE_REF or REFS must be set}"
+fi
 
 # Benchmarks are run at a fixed GOMAXPROCS so results do not depend on how many
 # cores the machine happens to have, and so there is always spare capacity for
@@ -80,8 +88,21 @@ main() {
   log "GOMAXPROCS=$GOMAXPROCS"
   log "cpus available: $(nproc 2>/dev/null || echo '?')"
   clone_once
-  run_side baseline  "$BASELINE_REF"
-  run_side candidate "$CANDIDATE_REF"
+
+  # Validate every ref up front: discovering a bad one an hour in, after the
+  # earlier sides are already measured, wastes the whole run.
+  local side ref
+  while IFS=':' read -r side ref; do
+    [[ -z "${side// }" ]] && continue
+    [[ "$side" =~ ^[a-z]+$ ]] || { echo "[bench] side '$side' must be lowercase letters only" >&2; exit 1; }
+    git -C "$WORKDIR/src" rev-parse --verify --quiet "${ref}^{commit}" >/dev/null ||
+      { echo "[bench] side '$side': no such commit '$ref'" >&2; exit 1; }
+  done <<< "$REFS"
+
+  while IFS=':' read -r side ref; do
+    [[ -z "${side// }" ]] && continue
+    run_side "$side" "$ref"
+  done <<< "$REFS"
   log "done"
 }
 

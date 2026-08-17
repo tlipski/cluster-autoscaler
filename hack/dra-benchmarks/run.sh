@@ -59,7 +59,11 @@ kube delete configmap "$JOB_NAME-script" --ignore-not-found >/dev/null 2>&1 || t
 log "uploading bench.sh"
 kube create configmap "$JOB_NAME-script" --from-file=bench.sh="$HERE/bench.sh"
 
-log "submitting job (baseline=$BASELINE_REF candidate=$CANDIDATE_REF)"
+if [[ -n "${REFS:-}" ]]; then
+  log "submitting job (refs: $(printf '%s' "$REFS" | tr '\n' ' '))"
+else
+  log "submitting job (baseline=$BASELINE_REF candidate=$CANDIDATE_REF)"
+fi
 kube apply -f - <<YAML
 apiVersion: batch/v1
 kind: Job
@@ -82,6 +86,9 @@ spec:
           value: "$BASELINE_REF"
         - name: CANDIDATE_REF
           value: "$CANDIDATE_REF"
+        - name: REFS
+          value: |-
+$(printf '%s\n' "${REFS:-}" | sed 's/^/            /')
         - name: GOMAXPROCS
           value: "$BENCH_GOMAXPROCS"
         - name: WORKDIR

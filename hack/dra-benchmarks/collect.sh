@@ -18,7 +18,12 @@ mkdir -p "$RESULTS_DIR"
 labels=$(grep -oE '^###BEGIN [a-z]+ [a-z]+###' "$RAW" | awk '{print $3}' | tr -d '#' | sort -u)
 [[ -n "$labels" ]] || fail "no benchmark blocks found in $RAW"
 
-for side in baseline candidate; do
+# Sides are whatever the log contains, in run order; the first is the base that
+# later ones are compared against.
+sides=$(grep -oE '^###BEGIN [a-z]+ [a-z]+###' "$RAW" | awk '{print $2}' | awk '!seen[$0]++')
+[[ -n "$sides" ]] || fail "no sides found in $RAW"
+
+for side in $sides; do
   for label in $labels; do
     awk -v s="###BEGIN $side $label###" -v e="###END $side $label###" \
       'index($0,s){f=1;next} index($0,e){f=0} f' "$RAW" > "$RESULTS_DIR/$label-$side.txt"
@@ -34,19 +39,40 @@ command -v benchstat >/dev/null 2>&1 || {
 SUMMARY="$RESULTS_DIR/summary.txt"
 : > "$SUMMARY"
 for label in $labels; do
-  b="$RESULTS_DIR/$label-baseline.txt"
-  c="$RESULTS_DIR/$label-candidate.txt"
-  # An empty block means the suite did not run - a malformed SUITE entry or a
-  # regex that matched nothing. Say so rather than quietly omitting it.
-  if ! grep -q '^Benchmark' "$b" 2>/dev/null || ! grep -q '^Benchmark' "$c" 2>/dev/null; then
-    log "WARNING: '$label' produced no benchmark results on one or both sides - check the regex and the SUITE syntax"
+  # A side with an empty block did not produce results for this suite - expected
+  # when a benchmark is introduced partway up a stack. Drop the side and say so,
+  # rather than dropping the whole suite.
+  present=(); absent=()
+  for side in $sides; do
+    if grep -q '^Benchmark' "$RESULTS_DIR/$label-$side.txt" 2>/dev/null; then
+      present+=("$side")
+    else
+      absent+=("$side")
+    fi
+  done
+  if [[ ${#present[@]} -eq 0 ]]; then
+    log "WARNING: '$label' produced no results on any side - check the regex and SUITE syntax"
     continue
   fi
   {
     echo "================ $label ================"
-    # Run from the results dir so benchstat labels the columns
-    # 'baseline'/'candidate' instead of printing absolute paths.
-    ( cd "$RESULTS_DIR" && benchstat "baseline=$label-baseline.txt" "candidate=$label-candidate.txt" 2>&1 ) || true
+    [[ ${#absent[@]} -gt 0 ]] && echo "(no results at: ${absent[*]} - benchmark absent at those refs)"
+    if [[ ${#present[@]} -eq 1 ]]; then
+      echo "(only ${present[0]} has results - nothing to compare against)"
+      ( cd "$RESULTS_DIR" && benchstat "${present[0]}=$label-${present[0]}.txt" 2>&1 ) || true
+    else
+      args=(); for side in "${present[@]}"; do args+=("$side=$label-$side.txt"); done
+      ( cd "$RESULTS_DIR" && benchstat "${args[@]}" 2>&1 ) || true
+      # All-against-base does not show what each step contributed; add the
+      # consecutive deltas when there are three or more sides.
+      if [[ ${#present[@]} -gt 2 ]]; then
+        for (( i = 1; i < ${#present[@]}; i++ )); do
+          prev="${present[i-1]}"; cur="${present[i]}"
+          echo; echo "---- step: $prev -> $cur ----"
+          ( cd "$RESULTS_DIR" && benchstat "$prev=$label-$prev.txt" "$cur=$label-$cur.txt" 2>&1 ) || true
+        done
+      fi
+    fi
     echo
   } | tee -a "$SUMMARY"
 done
