@@ -19,6 +19,7 @@ package kwok
 import (
 	"context"
 	"fmt"
+	resourceapi "k8s.io/api/resource/v1"
 	"os"
 	"strings"
 
@@ -252,7 +253,15 @@ func BuildKwokProvider(ko *kwokOptions) (*KwokCloudProvider, error) {
 		}
 	}
 
-	nodegroups = createNodegroups(nodeTemplates, ko.kubeClient, kwokConfig, ko.ngNodeListerFn, ko.allNodesLister)
+	// Optional: absent unless the templates ConfigMap declares DRA devices.
+	var sliceTemplates []*resourceapi.ResourceSlice
+	if kwokConfig.ReadNodesFrom == nodeTemplatesFromConfigMap {
+		if sliceTemplates, err = LoadResourceSliceTemplatesFromConfigMap(kwokConfig.ConfigMap.Name, ko.kubeClient); err != nil {
+			return nil, err
+		}
+	}
+
+	nodegroups = createNodegroups(nodeTemplates, sliceTemplates, ko.kubeClient, kwokConfig, ko.ngNodeListerFn, ko.allNodesLister)
 
 	return &KwokCloudProvider{
 		nodeGroups:      nodegroups,

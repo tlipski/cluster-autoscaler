@@ -19,6 +19,7 @@ package kwok
 import (
 	"context"
 	"fmt"
+	resourceapi "k8s.io/api/resource/v1"
 
 	apiv1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -196,7 +197,13 @@ func (nodeGroup *NodeGroup) Nodes() ([]cloudprovider.Instance, error) {
 
 // TemplateNodeInfo returns a node template for this node group.
 func (nodeGroup *NodeGroup) TemplateNodeInfo() (*framework.NodeInfo, error) {
-	nodeInfo := framework.NewNodeInfo(nodeGroup.nodeTemplate, nil, framework.NewPodInfo(cloudprovider.BuildKubeProxy(nodeGroup.Id()), nil))
+	// Copy the slices: the estimator sanitizes them per simulated node (renaming
+	// the pool), and the template must survive that to be reusable.
+	var slices []*resourceapi.ResourceSlice
+	for _, slice := range nodeGroup.resourceSlices {
+		slices = append(slices, slice.DeepCopy())
+	}
+	nodeInfo := framework.NewNodeInfo(nodeGroup.nodeTemplate, slices, framework.NewPodInfo(cloudprovider.BuildKubeProxy(nodeGroup.Id()), nil))
 	return nodeInfo, nil
 }
 

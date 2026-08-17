@@ -18,6 +18,7 @@ package kwok
 
 import (
 	"fmt"
+	resourceapi "k8s.io/api/resource/v1"
 	"testing"
 	"time"
 
@@ -310,6 +311,47 @@ func TestTemplateNodeInfo(t *testing.T) {
 	assert.Contains(t, ti.Pods()[0].Pod.Name, fmt.Sprintf("kube-proxy-%s", ng.name))
 	assert.Equal(t, ng.nodeTemplate, ti.Node())
 
+}
+
+func TestTemplateNodeInfoResourceSlices(t *testing.T) {
+	nodeName := "template-node-ng"
+	slice := &resourceapi.ResourceSlice{
+		ObjectMeta: metav1.ObjectMeta{Name: "slice-ng"},
+		Spec: resourceapi.ResourceSliceSpec{
+			NodeName: &nodeName,
+			Driver:   "gpu.example.com",
+			Pool:     resourceapi.ResourcePool{Name: nodeName, ResourceSliceCount: 1},
+			Devices:  []resourceapi.Device{{Name: "gpu-0"}},
+		},
+	}
+
+	ng := NodeGroup{
+		name:           "ng",
+		kubeClient:     &fake.Clientset{},
+		lister:         kube_util.NewTestNodeLister(nil),
+		nodeTemplate:   &apiv1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}},
+		resourceSlices: []*resourceapi.ResourceSlice{slice},
+		minSize:        0,
+		targetSize:     2,
+		maxSize:        3,
+	}
+
+	ti, err := ng.TemplateNodeInfo()
+	assert.Nil(t, err)
+	assert.Len(t, ti.LocalResourceSlices, 1)
+	assert.Equal(t, "gpu-0", ti.LocalResourceSlices[0].Spec.Devices[0].Name)
+
+	// The returned slices must be copies: the estimator sanitizes them per
+	// simulated node, and mutating the group's template would corrupt every
+	// later simulation.
+	ti.LocalResourceSlices[0].Spec.Pool.Name = "mutated"
+	assert.Equal(t, nodeName, ng.resourceSlices[0].Spec.Pool.Name)
+
+	// A group with no slices must behave exactly as before.
+	ng.resourceSlices = nil
+	ti, err = ng.TemplateNodeInfo()
+	assert.Nil(t, err)
+	assert.Empty(t, ti.LocalResourceSlices)
 }
 
 func TestGetOptions(t *testing.T) {
