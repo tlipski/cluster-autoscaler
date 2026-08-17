@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	resourceapi "k8s.io/api/resource/v1"
 	"log"
 	"strconv"
 	"strings"
@@ -42,6 +43,7 @@ import (
 
 const (
 	templatesKey               = "templates"
+	resourceSlicesKey          = "resourceSlices"
 	defaultTemplatesConfigName = "kwok-provider-templates"
 )
 
@@ -138,8 +140,61 @@ func LoadNodeTemplatesFromConfigMap(configMapName string,
 	return nodeTemplates, nil
 }
 
-func createNodegroups(nodes []*apiv1.Node, kubeClient kubernetes.Interface, kc *KwokProviderConfig, initCustomLister listerFn,
+// LoadResourceSliceTemplatesFromConfigMap reads the optional 'resourceSlices'
+// key of the templates ConfigMap. Each ResourceSlice is attached to the node
+// template whose name matches its spec.nodeName, which is how a node group
+// learns what devices its nodes advertise.
+//
+// The key is optional: a provider config without it behaves exactly as before,
+// so this cannot break an existing non-DRA setup.
+func LoadResourceSliceTemplatesFromConfigMap(configMapName string,
+	kubeClient kubernetes.Interface) ([]*resourceapi.ResourceSlice, error) {
+	currentNamespace := getCurrentNamespace()
+
+	c, err := kubeClient.CoreV1().ConfigMaps(currentNamespace).Get(context.Background(), configMapName, v1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get configmap '%s': %v", configMapName, err)
+	}
+	if c.Data[resourceSlicesKey] == "" {
+		return nil, nil
+	}
+
+	scheme := runtime.NewScheme()
+	clientscheme.AddToScheme(scheme)
+	decoder := serializer.NewCodecFactory(scheme).UniversalDeserializer()
+
+	slices := []*resourceapi.ResourceSlice{}
+	multiDocReader := yaml.NewYAMLReader(bufio.NewReader(strings.NewReader(c.Data[resourceSlicesKey])))
+	for {
+		buf, err := multiDocReader.Read()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+		obj, _, err := decoder.Decode(buf, nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode a ResourceSlice in '%s': %v", resourceSlicesKey, err)
+		}
+		slice, ok := obj.(*resourceapi.ResourceSlice)
+		if !ok {
+			return nil, fmt.Errorf("'%s' contains a %T, want a ResourceSlice", resourceSlicesKey, obj)
+		}
+		if slice.Spec.NodeName == nil || *slice.Spec.NodeName == "" {
+			return nil, fmt.Errorf("ResourceSlice '%s' has no spec.nodeName, so it cannot be matched to a node template", slice.GetName())
+		}
+		slices = append(slices, slice)
+	}
+	return slices, nil
+}
+
+func createNodegroups(nodes []*apiv1.Node, slices []*resourceapi.ResourceSlice, kubeClient kubernetes.Interface, kc *KwokProviderConfig, initCustomLister listerFn,
 	allNodeLister v1lister.NodeLister) []*NodeGroup {
+	slicesByNode := map[string][]*resourceapi.ResourceSlice{}
+	for _, slice := range slices {
+		slicesByNode[*slice.Spec.NodeName] = append(slicesByNode[*slice.Spec.NodeName], slice)
+	}
 	ngs := map[string]*NodeGroup{}
 
 	// note: not using _, node := range nodes here because it leads to unexpected behavior
@@ -167,6 +222,7 @@ func createNodegroups(nodes []*apiv1.Node, kubeClient kubernetes.Interface, kc *
 		}
 
 		ng := parseAnnotations(nodes[i], kc)
+		ng.resourceSlices = slicesByNode[nodes[i].GetName()]
 		ng.name = ngName
 		sanitizeNode(nodes[i])
 		prepareNode(nodes[i], ng.name)
