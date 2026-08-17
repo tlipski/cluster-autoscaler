@@ -222,6 +222,7 @@ kind: Node
 metadata:
   name: kwok-template-${ng}
   annotations:
+    kwok.x-k8s.io/node: fake
     cluster-autoscaler.kwok.nodegroup/name: "ng-${ng}"
     cluster-autoscaler.kwok.nodegroup/min-count: "0"
     cluster-autoscaler.kwok.nodegroup/max-count: "5000"
@@ -229,6 +230,7 @@ metadata:
     node.kubernetes.io/instance-type: "kwok-${ng}"
     kubernetes.io/os: linux
     kwok-benchmark: "true"
+    type: kwok
 spec: {}
 status:
   capacity:
@@ -283,6 +285,15 @@ YAML
 
 # Stands up the DRA prerequisites and, crucially, an already-allocated fleet.
 #
+# The fleet deliberately carries no nodegroup annotation and no grouping label,
+# so the kwok provider does not consider it its own. KwokCloudProvider.Cleanup()
+# deletes every node in every node group when CA shuts down - with the fleet
+# owned by a node group, the first configuration's exit wiped the allocated
+# state and every later configuration measured an empty cluster.
+#
+# CA still sees the fleet's claims and slices: the DRA snapshot is built from
+# the API cluster-wide, not per node group. Which is all this needs.
+#
 # The allocated claims are produced by scheduling real pods onto pre-created
 # kwok nodes rather than by hand-writing allocation status: the scheduler's DRA
 # plugin then owns the allocation, which is both realistic and avoids thousands
@@ -316,13 +327,9 @@ metadata:
   name: dra-fleet-${i}
   annotations:
     kwok.x-k8s.io/node: fake
-    cluster-autoscaler.kwok.nodegroup/name: "ng-1"
-    cluster-autoscaler.kwok.nodegroup/min-count: "0"
-    cluster-autoscaler.kwok.nodegroup/max-count: "5000"
   labels:
-    node.kubernetes.io/instance-type: "kwok-1"
     kubernetes.io/os: linux
-    kwok-benchmark: "true"
+    kwok-bench-fleet: "true"
     type: kwok
 status:
   capacity: { cpu: "16", memory: "64Gi", pods: "110" }
@@ -381,7 +388,10 @@ spec:
     metadata:
       labels: { app: dra-fleet-occupant }
     spec:
-      nodeSelector: { kwok-benchmark: "true" }
+      # Pinned to the fleet. Without this the occupants spread onto nodes CA
+      # creates, and the reset between configurations then evicts them - the
+      # standing allocated state evaporates halfway through the run.
+      nodeSelector: { kwok-bench-fleet: "true" }
       tolerations:
       - key: kwok.x-k8s.io/node
         operator: Exists
@@ -428,6 +438,58 @@ build_ca() {
   fi
   echo "$ref $sha" >> "$RESULTS_ROOT/ca-commit.txt"
   CA_BINARY="$bin"
+}
+
+# The kwok provider creates Node objects and nothing else. Attaching slices to
+# the template (the kwok-dra-templates change) only teaches CA's *simulation*
+# that a new node would carry devices - in the real cluster that node advertises
+# nothing, so the scheduler can never place a DRA pod on it. CA then scales up
+# again, forever, and no pod ever runs.
+#
+# This publishes the missing ResourceSlice for every node CA creates. Upstream
+# the provider itself would have to do this; here a watcher is enough.
+start_slice_publisher() {
+  [[ "$DRA" == "1" ]] || return 0
+  log "starting ResourceSlice publisher for CA-created nodes"
+  (
+    # The loop must not inherit -e/pipefail. On the first pass the only labelled
+    # nodes are the fleet, so the grep below matches nothing and exits 1;
+    # pipefail turns that into a failed assignment and -e then kills the whole
+    # publisher before it has ever run. Which is exactly what happened.
+    set +e +o pipefail
+    published=0
+    while sleep 3; do
+      # Nodes that are ours, are not the pre-built fleet, and have no slice yet.
+      have=$(kubectl get resourceslices -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' 2>/dev/null | sort -u)
+      want=$(kubectl get nodes -l kwok-benchmark=true -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+             | grep -v '^dra-fleet-' | sort -u)
+      missing=$(comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$have") 2>/dev/null)
+      [[ -z "${missing// }" ]] && continue
+      published=$(( published + $(printf '%s\n' "$missing" | grep -c .) ))
+      echo "$published" > "$RESULTS_ROOT/dra-published-slices.txt"
+      {
+        for n in $missing; do
+          cat <<SLICE
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceSlice
+metadata:
+  name: slice-${n}
+spec:
+  nodeName: ${n}
+  driver: ${DRA_DRIVER}
+  pool:
+    name: ${n}
+    resourceSliceCount: 1
+    generation: 1
+  devices:
+$(for (( d = 0; d < DRA_DEVICES_PER_NODE; d++ )); do echo "  - name: gpu-${d}"; done)
+SLICE
+        done
+      } | kubectl apply -f - >/dev/null 2>&1 || true
+    done
+  ) &
+  SLICE_PUBLISHER_PID=$!
 }
 
 dra_claim_template() {
@@ -655,6 +717,7 @@ main() {
   install_kwok
   configure_provider
   dra_prepare
+  start_slice_publisher
 
   if [[ -z "$SWEEP" ]]; then
     build_ca "$REF"
@@ -689,6 +752,7 @@ main() {
 # "died ten minutes ago".
 GCS_DEST="${GCS_DEST:-}"
 CA_PID=""
+SLICE_PUBLISHER_PID=""
 mkdir -p "$WORKDIR" "$RESULTS_ROOT" 2>/dev/null || { sudo mkdir -p "$WORKDIR" "$RESULTS_ROOT"; sudo chown -R "$(id -u):$(id -g)" "$WORKDIR"; }
 LOGFILE="$WORKDIR/remote.log"
 exec > >(tee -a "$LOGFILE") 2>&1
@@ -715,6 +779,7 @@ finish() {
   local rc=$?
   # The only EXIT trap in this script - see run_benchmark.
   [[ -n "${CA_PID:-}" ]] && kill "$CA_PID" 2>/dev/null || true
+  [[ -n "${SLICE_PUBLISHER_PID:-}" ]] && kill "$SLICE_PUBLISHER_PID" 2>/dev/null || true
   if [[ -n "$GCS_DEST" ]]; then
     log "uploading results to $GCS_DEST"
     gcloud storage cp -r "$RESULTS_ROOT/*" "$GCS_DEST/results/" >/dev/null 2>&1 || true
