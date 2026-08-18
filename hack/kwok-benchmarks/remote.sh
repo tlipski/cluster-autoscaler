@@ -406,8 +406,11 @@ spec:
           requests: { cpu: "250m", memory: "512Mi" }
 YAML
 
+  # Up to 20 minutes. 400 claims allocate in ~25s, but this scales with the
+  # fleet and a large one must finish before any measurement starts - a
+  # half-populated fleet silently understates the whole result.
   local want=$(( DRA_FLEET_NODES * DRA_FLEET_CLAIMS_PER_NODE )) got=0
-  for _ in $(seq 1 120); do
+  for _ in $(seq 1 240); do
     got=$(kubectl get resourceclaims -n dra-fleet -o json 2>/dev/null \
       | jq '[.items[] | select(.status.allocation != null)] | length' 2>/dev/null || echo 0)
     (( got >= want )) && break
