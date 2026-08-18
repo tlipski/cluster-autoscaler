@@ -214,6 +214,10 @@ Both refs above therefore include a provider fix that reads slices from an
 optional `resourceSlices` key in the templates ConfigMap. It is identical on both
 sides, so it cannot influence the comparison - verify with:
 
+> Run `git fetch origin` first if any SHA below reports *"unknown revision"*. A
+> clone only carries what existed when it was made, and these branches are still
+> moving.
+
 Use the same SHAs the `SWEEP` above runs, so the check covers exactly the refs
 being benchmarked. `git clone -b kwok-benchmarks` creates only that one *local*
 branch, so a bare `kwok-dra-base` will not resolve - the other branches arrive as
@@ -241,6 +245,7 @@ It is one commit, `27ac97c`, also on its own branch (`kwok-dra-templates`) off
 `main` so it can be read without the DRA change in the way:
 
 ```bash
+git fetch origin                   # a clone older than the branch will not have it
 git log -1 27ac97c                 # the commit and its reasoning
 git show 27ac97c                   # the full patch
 git diff 3f19984 27ac97c --stat    # against main
