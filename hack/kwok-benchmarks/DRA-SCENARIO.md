@@ -7,6 +7,7 @@ has to be taken on trust.
 <!-- toc -->
 - [What it simulates](#what-it-simulates)
 - [Why each parameter is what it is](#why-each-parameter-is-what-it-is)
+- [Resources the scenario creates](#resources-the-scenario-creates)
 - [Rerunning it](#rerunning-it)
 - [Checking the run was valid](#checking-the-run-was-valid)
 - [Reading the numbers](#reading-the-numbers)
@@ -80,6 +81,256 @@ sharpening the result.
 
 **Scale-down is disabled for DRA runs** ([`remote.sh:61`](./remote.sh#L61)). The
 fleet is underutilised by design, which is exactly what scale-down would remove.
+
+## Resources the scenario creates
+
+Object counts are for the full-scale run (`DRA_FLEET_NODES=1000`,
+`DRA_FLEET_CLAIMS_PER_NODE=8`, 50 Deployments x 10 replicas). Snippets are the
+YAML the harness applies, with shell variables resolved.
+
+| object | count | created by |
+|---|---|---|
+| `DeviceClass` | 1 | [`dra_prepare()`](./remote.sh#L301) |
+| fleet `Node` | 1,000 | [`dra_prepare()`](./remote.sh#L301) |
+| fleet `ResourceSlice` | 1,000 | [`dra_prepare()`](./remote.sh#L301) |
+| `ResourceClaimTemplate` | 1 per namespace | [`dra_claim_template()`](./remote.sh#L498) |
+| fleet occupant `Deployment` | 1 (8,000 replicas) | [`dra_prepare()`](./remote.sh#L301) |
+| **allocated `ResourceClaim`** | **8,000** | the scheduler, from the template |
+| workload `Deployment` | 50 (500 replicas) | [`emit()`](./remote.sh#L536) |
+| node-group template `Node` | 3 (in a ConfigMap) | [`configure_provider()`](./remote.sh#L188) |
+| node-group template `ResourceSlice` | 3 (in a ConfigMap) | [`configure_provider()`](./remote.sh#L188) |
+| `ResourceSlice` for created nodes | ~63 | [`start_slice_publisher()`](./remote.sh#L454) |
+
+### 1. DeviceClass
+
+One class, matching the single fake driver.
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: gpu.kwok-bench
+spec:
+  selectors:
+  - cel:
+      expression: 'device.driver == "gpu.example.com"'
+```
+
+### 2. The fleet: 1,000 nodes, each with 8 devices
+
+`kwok.x-k8s.io/node: fake` is what makes the kwok controller manage the node and
+mark it Ready. Note there is **no** `cluster-autoscaler.kwok.nodegroup/*`
+annotation and no `node.kubernetes.io/instance-type` label: that keeps the fleet
+out of any node group, because
+[`KwokCloudProvider.Cleanup()`](../../pkg/cloudprovider/kwok/kwok_provider.go)
+deletes every node of every node group when CA exits, which would destroy the
+allocated state between the two measured configurations.
+
+```yaml
+apiVersion: v1
+kind: Node
+metadata:
+  name: dra-fleet-0            # ... through dra-fleet-999
+  annotations:
+    kwok.x-k8s.io/node: fake
+  labels:
+    kubernetes.io/os: linux
+    kwok-bench-fleet: "true"   # occupants select on this
+    type: kwok
+status:
+  capacity:    { cpu: "16", memory: "64Gi", pods: "110" }
+  allocatable: { cpu: "16", memory: "64Gi", pods: "110" }
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceSlice
+metadata:
+  name: slice-dra-fleet-0
+spec:
+  nodeName: dra-fleet-0
+  driver: gpu.example.com
+  pool:
+    name: dra-fleet-0
+    resourceSliceCount: 1
+    generation: 1
+  devices:
+  - name: gpu-0                # ... through gpu-7
+```
+
+### 3. What fills the fleet: 8,000 allocated claims
+
+One `ResourceClaimTemplate` per namespace, then a Deployment sized to consume
+every device. The claims are allocated **by the scheduler** as these pods land -
+not by hand-written `status.allocation` - which is both realistic and avoids
+8,000 status subresource writes.
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-claim
+  namespace: dra-fleet
+spec:
+  spec:
+    devices:
+      requests:
+      - name: req-0
+        exactly:
+          deviceClassName: gpu.kwok-bench
+          allocationMode: ExactCount
+          count: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dra-fleet-occupant
+  namespace: dra-fleet
+spec:
+  replicas: 8000               # FLEET_NODES x CLAIMS_PER_NODE
+  selector:
+    matchLabels: { app: dra-fleet-occupant }
+  template:
+    metadata:
+      labels: { app: dra-fleet-occupant }
+    spec:
+      nodeSelector: { kwok-bench-fleet: "true" }   # stays off CA-created nodes
+      tolerations:
+      - key: kwok.x-k8s.io/node
+        operator: Exists
+        effect: NoSchedule
+      resourceClaims:
+      - name: gpu
+        resourceClaimTemplateName: gpu-claim
+      containers:
+      - name: c
+        image: registry.k8s.io/pause:3.10
+        resources:
+          requests: { cpu: "250m", memory: "512Mi" }
+```
+
+Each replica produces one `ResourceClaim` that reaches
+`status.allocation` - those 8,000 objects are the state the change is about.
+
+### 4. The measured burst: 50 Deployments x 10 replicas
+
+`resourceClaimTemplateName` rather than a per-pod `resourceClaimName` keeps every
+replica's spec identical, so a Deployment collapses to one equivalence group.
+`nodeSelector: kwok-benchmark: "true"` matches only node-group nodes, never the
+fleet - so these pods cannot land on the (full) fleet and force a scale-up.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uni-0                  # ... through uni-49
+  namespace: bench-0
+spec:
+  replicas: 10
+  selector:
+    matchLabels: { app: uni-0 }
+  template:
+    metadata:
+      labels: { app: uni-0 }
+    spec:
+      nodeSelector:
+        kwok-benchmark: "true"
+      tolerations:
+      - key: kwok.x-k8s.io/node
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: c
+        image: registry.k8s.io/pause:3.10
+        resources:
+          requests: { cpu: "250m", memory: "512Mi" }
+      resourceClaims:          # DRA=1 only
+      - name: gpu
+        resourceClaimTemplateName: gpu-claim
+```
+
+### 5. What CA scales: the node-group templates
+
+Two ConfigMaps in `default`. The provider config points at the templates, and
+`fromNodeLabelKey` is how nodes are bucketed into groups - get it wrong and CA
+silently never scales up.
+
+```yaml
+# ConfigMap kwok-provider-config, key "config"
+apiVersion: v1alpha1
+readNodesFrom: configmap
+nodegroups:
+  fromNodeLabelKey: "node.kubernetes.io/instance-type"
+nodes:
+  skipTaint: true              # or nothing ever schedules on the fake nodes
+configmap:
+  name: kwok-provider-templates
+  key: templates
+```
+
+```yaml
+# ConfigMap kwok-provider-templates, key "templates" - three of these
+apiVersion: v1
+kind: Node
+metadata:
+  name: kwok-template-1        # ... -2, -3
+  annotations:
+    kwok.x-k8s.io/node: fake
+    cluster-autoscaler.kwok.nodegroup/name: "ng-1"
+    cluster-autoscaler.kwok.nodegroup/min-count: "0"
+    cluster-autoscaler.kwok.nodegroup/max-count: "5000"
+  labels:
+    node.kubernetes.io/instance-type: "kwok-1"   # the grouping key
+    kubernetes.io/os: linux
+    kwok-benchmark: "true"
+    type: kwok
+spec: {}
+status:
+  capacity:    { cpu: "16", memory: "64Gi", pods: "110" }
+  allocatable: { cpu: "16", memory: "64Gi", pods: "110" }
+  conditions:
+  - type: Ready
+    status: "True"
+```
+
+```yaml
+# ConfigMap kwok-provider-templates, key "resourceSlices" - three of these.
+# Read only by the patched provider; joined to a template by spec.nodeName.
+apiVersion: resource.k8s.io/v1
+kind: ResourceSlice
+metadata:
+  name: slice-kwok-template-1
+spec:
+  nodeName: kwok-template-1
+  driver: gpu.example.com
+  pool:
+    name: kwok-template-1
+    resourceSliceCount: 1
+    generation: 1
+  devices:
+  - name: gpu-0                # ... through gpu-7
+```
+
+### 6. Slices for the nodes CA creates
+
+The provider creates a `Node` and nothing else, so a node it adds advertises no
+devices and no DRA pod can ever be placed on it - CA would scale up forever. A
+watcher publishes the missing slice for each new node; in a real cluster the DRA
+driver on the node does this.
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceSlice
+metadata:
+  name: slice-ng-1-abc12       # one per node CA creates
+spec:
+  nodeName: ng-1-abc12
+  driver: gpu.example.com
+  pool:
+    name: ng-1-abc12
+    resourceSliceCount: 1
+    generation: 1
+  devices:
+  - name: gpu-0                # ... through gpu-7
+```
 
 ## Rerunning it
 

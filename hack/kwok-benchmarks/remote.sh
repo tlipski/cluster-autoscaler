@@ -314,8 +314,8 @@ spec:
 YAML
 
   # The fleet: real Node objects kwok will mark Ready, each advertising devices.
-  # They carry the node group annotations so the provider counts them as existing
-  # capacity rather than as strangers.
+  # Deliberately no nodegroup annotation and no grouping label - see the note
+  # above dra_prepare on why provider ownership would destroy them.
   local f="$WORKDIR/dra-fleet.yaml"; : > "$f"
   local i d
   for (( i = 0; i < DRA_FLEET_NODES; i++ )); do
