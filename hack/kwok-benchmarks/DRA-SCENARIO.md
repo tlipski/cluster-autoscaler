@@ -214,9 +214,25 @@ Both refs above therefore include a provider fix that reads slices from an
 optional `resourceSlices` key in the templates ConfigMap. It is identical on both
 sides, so it cannot influence the comparison - verify with:
 
+Use the same SHAs the `SWEEP` above runs, so the check covers exactly the refs
+being benchmarked. `git clone -b kwok-benchmarks` creates only that one *local*
+branch, so a bare `kwok-dra-base` will not resolve - the other branches arrive as
+`origin/kwok-dra-base`. The SHAs work either way:
+
 ```bash
-git diff kwok-dra-base kwok-dra-candidate -- pkg/cloudprovider/kwok/   # empty
-git diff kwok-dra-base kwok-dra-candidate --stat                       # only the DRA change
+git diff 53becdb 2675936 -- pkg/cloudprovider/kwok/   # empty: provider identical
+git diff 53becdb 2675936 --stat                       # only the DRA change
+```
+
+Expected output of the second command - four files, all under
+`pkg/simulator/dynamicresources/`:
+
+```
+ .../dynamicresources/snapshot/snapshot.go               |  82 ++++-
+ .../snapshot/snapshot_allocated_state.go                | 273 +++++++++++++++
+ .../snapshot/snapshot_allocated_state_test.go           | 386 +++++++++++++++++++++
+ .../snapshot/snapshot_claim_tracker.go                  |  91 ++---
+ 4 files changed, 787 insertions(+), 45 deletions(-)
 ```
 
 That fix is not upstream, which is why this cannot yet be run against plain
