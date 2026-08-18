@@ -235,6 +235,52 @@ Expected output of the second command - four files, all under
  4 files changed, 787 insertions(+), 45 deletions(-)
 ```
 
+### Reviewing the provider fix itself
+
+It is one commit, `27ac97c`, also on its own branch (`kwok-dra-templates`) off
+`main` so it can be read without the DRA change in the way:
+
+```bash
+git log -1 27ac97c                 # the commit and its reasoning
+git show 27ac97c                   # the full patch
+git diff 3f19984 27ac97c --stat    # against main
+```
+
+The same change as it appears inside the benchmarked refs - `de948bf` is the
+PR-55 base before the fix, `53becdb` is that plus the fix and nothing else:
+
+```bash
+git diff de948bf 53becdb --stat
+```
+
+```
+ pkg/cloudprovider/kwok/kwok_helpers.go         | 58 +++++++++++++++++++++++++-
+ pkg/cloudprovider/kwok/kwok_nodegroups.go      |  9 +++-
+ pkg/cloudprovider/kwok/kwok_nodegroups_test.go | 42 +++++++++++++++++++
+ pkg/cloudprovider/kwok/kwok_provider.go        | 11 ++++-
+ pkg/cloudprovider/kwok/kwok_types.go           | 13 ++++--
+ 5 files changed, 127 insertions(+), 6 deletions(-)
+```
+
+What it does, in four parts:
+
+| file | change |
+|---|---|
+| [`kwok_types.go`](../../pkg/cloudprovider/kwok/kwok_types.go) | `NodeGroup` gains a `resourceSlices` field |
+| [`kwok_helpers.go`](../../pkg/cloudprovider/kwok/kwok_helpers.go) | loads an optional `resourceSlices` key from the templates ConfigMap, joining each slice to a node template by `spec.nodeName` |
+| [`kwok_nodegroups.go`](../../pkg/cloudprovider/kwok/kwok_nodegroups.go) | `TemplateNodeInfo` returns deep copies of them instead of `nil` |
+| [`kwok_provider.go`](../../pkg/cloudprovider/kwok/kwok_provider.go) | wires the loader into `BuildKwokProvider` |
+
+The key is optional, so a provider config without it behaves exactly as before -
+which is what keeps this from affecting any non-DRA use. The added test
+(`TestTemplateNodeInfoResourceSlices`) covers the attach path, that the returned
+slices are copies (the estimator renames pools per simulated node, so a shared
+template would be corrupted), and the empty case.
+
+Note the paths above resolve against the `kwok-benchmarks` branch, which is based
+on `main` - so following them shows the **unpatched** code, with the `nil` this
+fix replaces.
+
 That fix is not upstream, which is why this cannot yet be run against plain
 upstream refs. "The kwok provider silently cannot do DRA" is arguably a gap
 worth addressing separately.
