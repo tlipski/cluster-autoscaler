@@ -20,6 +20,7 @@ import (
 	resourceapi "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/dynamic-resource-allocation/structured"
+	"k8s.io/klog/v2"
 )
 
 // allocatedStateTracker maintains the set of devices consumed by the ResourceClaims in a
@@ -66,8 +67,9 @@ type allocatedStateTracker struct {
 	// devices holds the devices claimed exclusively, matching what GatherAllocatedState
 	// reports when the DRAConsumableCapacity feature is enabled.
 	devices refCountedSet[structured.DeviceID]
-	// allDevices holds every allocated device, including the shared ones. This matches
-	// ListAllAllocatedDevices, which asks foreachAllocatedDevice to ignore sharing.
+	// allDevices holds every allocated device, including the shared ones. This is what
+	// ListAllAllocatedDevices reports, and what GatherAllocatedState reports as allocated
+	// when the DRAConsumableCapacity feature is disabled.
 	allDevices refCountedSet[structured.DeviceID]
 	// sharedDeviceIDs holds the (device, share) pairs of the shared devices.
 	sharedDeviceIDs refCountedSet[structured.SharedDeviceID]
@@ -80,6 +82,14 @@ type allocatedStateTracker struct {
 	// built is false until the state has been populated from a full pass over the claims.
 	// Writes are ignored while it is false, because that first pass picks them up anyway.
 	built bool
+
+	// borrowed is true when a collection has been handed to a caller since the last write,
+	// and the borrowedX fields hold the sizes the collections had at that moment. See
+	// verifyNotModified.
+	borrowed           bool
+	borrowedDevices    int
+	borrowedAllDevices int
+	borrowedCapacity   int
 }
 
 // claimContribution is what a single ResourceClaim adds to the tracked state.
@@ -107,6 +117,63 @@ func newAllocatedStateTracker() *allocatedStateTracker {
 	}
 }
 
+// noteBorrowed records the size of each collection as it is handed to a caller, so that the
+// next write can tell whether anything wrote through it.
+func (t *allocatedStateTracker) noteBorrowed() {
+	t.borrowed = true
+	t.borrowedDevices = len(t.devices.set)
+	t.borrowedAllDevices = len(t.allDevices.set)
+	t.borrowedCapacity = len(t.capacity)
+}
+
+// verifyNotModified checks that nothing wrote through a collection handed out since the last
+// write, and drops the maintained state if something did. It reports whether that state is
+// still usable - false means it was dropped and the next read rebuilds it from the claims.
+//
+// The collections are handed out live rather than copied (see "Borrowed collections" in
+// snapshot_claim_tracker.go), which is only safe while every consumer treats them as read
+// only. fwk.ResourceClaimTracker does not require that, so this is the backstop: comparing
+// map sizes is O(1), and it turns a consumer writing through the alias from silent, permanent
+// divergence - nothing else ever recomputes this - into one rebuild and a log line.
+//
+// Size comparison catches entries being added or removed, which is what a consumer that
+// treats the state as its own scratch space would do. It does not catch an equal number of
+// additions and removals, nor a resource.Quantity mutated in place inside an existing
+// AggregatedCapacity entry. Catching those needs a deep comparison on every write, which
+// costs what handing the collections out saves.
+func (t *allocatedStateTracker) verifyNotModified() bool {
+	// Kept tiny so it inlines: every write goes through it, and after the first one in a
+	// batch there is nothing to check.
+	if !t.borrowed {
+		return true
+	}
+	return t.rebuildIfModified()
+}
+
+// rebuildIfModified is the outlined slow path of verifyNotModified.
+func (t *allocatedStateTracker) rebuildIfModified() bool {
+	t.borrowed = false
+	if len(t.devices.set) == t.borrowedDevices &&
+		len(t.allDevices.set) == t.borrowedAllDevices &&
+		len(t.capacity) == t.borrowedCapacity {
+		return true
+	}
+
+	klog.Background().Error(nil, "DRA allocated state was modified through a borrowed collection, rebuilding it from the ResourceClaims",
+		"devices", len(t.devices.set), "expectedDevices", t.borrowedDevices,
+		"allDevices", len(t.allDevices.set), "expectedAllDevices", t.borrowedAllDevices,
+		"capacityEntries", len(t.capacity), "expectedCapacityEntries", t.borrowedCapacity)
+	t.reset()
+	return false
+}
+
+// reset drops the maintained state so that the next read rebuilds it from the claims. The
+// collections are replaced rather than emptied, because whoever corrupted them may still be
+// holding the old ones.
+func (t *allocatedStateTracker) reset() {
+	*t = *newAllocatedStateTracker()
+}
+
 // isBuilt reports whether the state has been populated. While it hasn't, updates are
 // skipped, because the first full pass picks them up anyway.
 func (t *allocatedStateTracker) isBuilt() bool {
@@ -123,7 +190,9 @@ func (t *allocatedStateTracker) ensureBuilt(walkClaims func(func(*resourceapi.Re
 	// Mark as built first - apply is a no-op until it is.
 	t.built = true
 	walkClaims(func(claim *resourceapi.ResourceClaim) bool {
-		t.apply(GetClaimId(claim), claim)
+		// record rather than apply: nothing can have been handed out while the state is
+		// being built, so the tripwire has nothing to check and this runs once per claim.
+		t.record(GetClaimId(claim), claim)
 		return true
 	})
 }
@@ -131,11 +200,15 @@ func (t *allocatedStateTracker) ensureBuilt(walkClaims func(func(*resourceapi.Re
 // apply records the claim as the current contribution for claimId, withdrawing whatever the
 // claim contributed before. A nil claim only withdraws.
 func (t *allocatedStateTracker) apply(claimId ResourceClaimId, claim *resourceapi.ResourceClaim) {
-	if !t.built {
+	if !t.built || !t.verifyNotModified() {
 		return
 	}
+	t.record(claimId, claim)
+}
 
-	t.withdraw(claimId)
+// record is apply without the tripwire check, for callers that have already made it.
+func (t *allocatedStateTracker) record(claimId ResourceClaimId, claim *resourceapi.ResourceClaim) {
+	t.drop(claimId)
 	if claim == nil {
 		return
 	}
@@ -149,7 +222,14 @@ func (t *allocatedStateTracker) apply(claimId ResourceClaimId, claim *resourceap
 			contribution.sharedDevices = append(contribution.sharedDevices, deviceID)
 			contribution.sharedDeviceIDs = append(contribution.sharedDeviceIDs, structured.MakeSharedDeviceID(deviceID, result.ShareID))
 			if result.ConsumedCapacity != nil {
-				contribution.capacity = append(contribution.capacity, structured.NewDeviceConsumedCapacity(deviceID, result.ConsumedCapacity))
+				// Clone, because the contribution outlives this call and withdraw has to
+				// subtract exactly what was added here. NewDeviceConsumedCapacity only
+				// shallow-copies each resource.Quantity out of the claim's map, so the
+				// result still shares the inf.Dec behind any quantity held in decimal
+				// form. The Snapshot rewrites claims in place, so an update that reaches
+				// that quantity would move the value out from under the contribution and
+				// leave the aggregate permanently skewed - it is never recomputed.
+				contribution.capacity = append(contribution.capacity, structured.NewDeviceConsumedCapacity(deviceID, result.ConsumedCapacity).Clone())
 			}
 			return
 		}
@@ -180,10 +260,14 @@ func (t *allocatedStateTracker) apply(claimId ResourceClaimId, claim *resourceap
 
 // withdraw removes whatever the claim with the given id currently contributes.
 func (t *allocatedStateTracker) withdraw(claimId ResourceClaimId) {
-	if !t.built {
+	if !t.built || !t.verifyNotModified() {
 		return
 	}
+	t.drop(claimId)
+}
 
+// drop is withdraw without the tripwire check, for callers that have already made it.
+func (t *allocatedStateTracker) drop(claimId ResourceClaimId) {
 	contribution, found := t.contributions[claimId]
 	if !found {
 		return
@@ -210,28 +294,37 @@ func (t *allocatedStateTracker) withdraw(claimId ResourceClaimId) {
 // individual write going through the tracker. lookup returns the claim now effective for an
 // id, or false if there is none.
 func (t *allocatedStateTracker) refresh(claimIds []ResourceClaimId, lookup func(ResourceClaimId) (*resourceapi.ResourceClaim, bool)) {
-	if !t.built {
+	if !t.built || !t.verifyNotModified() {
 		return
 	}
 
 	for _, claimId := range claimIds {
 		claim, found := lookup(claimId)
 		if !found {
-			t.withdraw(claimId)
+			t.drop(claimId)
 			continue
 		}
-		t.apply(claimId, claim)
+		t.record(claimId, claim)
 	}
 }
 
 // allocatedState returns the tracked state. The returned collections are the tracker's own
 // and must not be modified - see snapshotClaimTracker.GatherAllocatedState.
 func (t *allocatedStateTracker) allocatedState() *structured.AllocatedState {
+	t.noteBorrowed()
 	return &structured.AllocatedState{
 		AllocatedDevices:         t.devices.set,
 		AllocatedSharedDeviceIDs: t.sharedDeviceIDs.set,
 		AggregatedCapacity:       t.capacity,
 	}
+}
+
+// allAllocatedDevices returns every allocated device, shared ones included. The returned set
+// is the tracker's own and must not be modified - see
+// snapshotClaimTracker.ListAllAllocatedDevices.
+func (t *allocatedStateTracker) allAllocatedDevices() sets.Set[structured.DeviceID] {
+	t.noteBorrowed()
+	return t.allDevices.set
 }
 
 func (c *claimContribution) isEmpty() bool {

@@ -287,7 +287,9 @@ func (s *Snapshot) Revert() {
 	//
 	// This walks the dropped layer a second time, so it is O(P) in the size of that layer.
 	// PatchSet.Revert is already O(P), so the operation stays in the same complexity class
-	// and only picks up a larger constant.
+	// and only picks up a larger constant. When there is no layer to drop - a Revert with no
+	// Fork under it - WalkCurrentPatchKeys walks nothing, so this stays a no-op rather than
+	// re-reading every claim in the base layer.
 	//
 	// Skipped entirely when nothing has been derived from the claims yet, which
 	// is the case for the whole life of a snapshot whenever DRA is disabled -

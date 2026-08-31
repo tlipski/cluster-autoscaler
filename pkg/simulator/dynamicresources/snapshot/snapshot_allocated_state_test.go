@@ -43,20 +43,34 @@ import (
 // referenceAllocatedState recomputes the allocated state from scratch, the way
 // GatherAllocatedState used to before the state was maintained incrementally. The
 // incremental tracker has to agree with this at all times.
+//
+// It deliberately shares no traversal code with the implementation it checks: it walks the
+// allocation results itself rather than going through forEachAllocatedResult, and lists the
+// claims with listResourceClaims rather than the Snapshot.walkResourceClaims wrapper the
+// tracker builds itself from. Both of those are part of what is under test here, and a
+// reference that called them would agree with a broken tracker about a skipped or
+// double-counted result.
 func referenceAllocatedState(snapshot *Snapshot, enabledConsumableCapacity bool) *structured.AllocatedState {
 	devices := sets.New[structured.DeviceID]()
 	sharedDeviceIDs := sets.New[structured.SharedDeviceID]()
 	capacity := structured.NewConsumedCapacityCollection()
 
-	snapshot.walkResourceClaims(func(claim *resourceapi.ResourceClaim) bool {
-		foreachAllocatedDevice(claim,
-			func(deviceID structured.DeviceID) { devices.Insert(deviceID) },
-			enabledConsumableCapacity,
-			func(sharedDeviceID structured.SharedDeviceID) { sharedDeviceIDs.Insert(sharedDeviceID) },
-			func(deviceCapacity structured.DeviceConsumedCapacity) { capacity.Insert(deviceCapacity) },
-		)
-		return true
-	})
+	for _, claim := range snapshot.listResourceClaims() {
+		if claim.Status.Allocation == nil {
+			continue
+		}
+		for _, result := range claim.Status.Allocation.Devices.Results {
+			deviceID := structured.MakeDeviceID(result.Driver, result.Pool, result.Device)
+			if enabledConsumableCapacity && result.ShareID != nil {
+				sharedDeviceIDs.Insert(structured.MakeSharedDeviceID(deviceID, result.ShareID))
+				if result.ConsumedCapacity != nil {
+					capacity.Insert(structured.NewDeviceConsumedCapacity(deviceID, result.ConsumedCapacity))
+				}
+				continue
+			}
+			devices.Insert(deviceID)
+		}
+	}
 
 	return &structured.AllocatedState{
 		AllocatedDevices:         devices,
@@ -279,6 +293,47 @@ func TestAllocatedStateTrackerRandomizedOperations(t *testing.T) {
 	}
 }
 
+// TestAllocatedStateRevertWithoutForkRefreshesNothing checks that a Revert with no Fork
+// under it does not refresh anything.
+//
+// PatchSet.Revert keeps the bottom layer, so at that depth it discards nothing and no
+// claim's effective value changes. The topmost layer is then the base layer holding every
+// claim in the snapshot, so a refresh driven off it would re-read the whole cluster's worth
+// of claims to conclude nothing moved - turning a no-op into the O(claims) walk this
+// mechanism exists to avoid.
+func TestAllocatedStateRevertWithoutForkRefreshesNothing(t *testing.T) {
+	claims := map[ResourceClaimId]*resourceapi.ResourceClaim{}
+	for i := 0; i < 3; i++ {
+		claim := allocatedStateTestClaim("default", fmt.Sprintf("claim-%d", i),
+			allocationForDevices(dedicatedResult("driver", "pool", fmt.Sprintf("dev-%d", i))))
+		claims[GetClaimId(claim)] = claim
+	}
+	snapshot := NewSnapshot(claims, nil, nil, nil)
+	assertStateMatchesReference(t, snapshot, "initial")
+
+	refreshed := 0
+	countingLookup := func(claimId ResourceClaimId) (*resourceapi.ResourceClaim, bool) {
+		refreshed++
+		return snapshot.getResourceClaim(claimId)
+	}
+
+	// Mirror what Snapshot.Revert does, with a lookup that counts the claims re-read.
+	var revertedClaimIds []ResourceClaimId
+	snapshot.resourceClaims.WalkCurrentPatchKeys(func(claimId ResourceClaimId) bool {
+		revertedClaimIds = append(revertedClaimIds, claimId)
+		return true
+	})
+	snapshot.allocatedState.refresh(revertedClaimIds, countingLookup)
+
+	if refreshed != 0 {
+		t.Errorf("Revert on an unforked snapshot re-read %d claims, want 0", refreshed)
+	}
+
+	// The state still has to be right, and a real Revert still has to be a no-op.
+	snapshot.Revert()
+	assertStateMatchesReference(t, snapshot, "after Revert without Fork")
+}
+
 // TestAllocatedStateTrackerBuildsLazily checks that mutations applied before the state is
 // ever read are still reflected, since the tracker skips updates until its first full pass.
 func TestAllocatedStateTrackerBuildsLazily(t *testing.T) {
@@ -292,13 +347,120 @@ func TestAllocatedStateTrackerBuildsLazily(t *testing.T) {
 	// First read of the state - has to pick up the claim added before any read.
 	assertStateMatchesReference(t, snapshot, "after first read")
 
+	if want := structured.MakeDeviceID("driver", "pool", "dev-1"); !deviceAllocated(t, snapshot, want) {
+		t.Errorf("GatherAllocatedState(): device %v missing from the allocated state", want)
+	}
+}
+
+// TestAllocatedStateTrackerConsumedCapacityIsCopied checks that a claim's consumed capacity
+// is copied into the contribution rather than referenced.
+//
+// structured.NewDeviceConsumedCapacity only shallow-copies each resource.Quantity out of the
+// claim, so the copy still points at the same inf.Dec whenever the quantity is held in
+// decimal form - which is what a value too large for int64 gets parsed into. The Snapshot
+// rewrites claims in place, so arithmetic reaching that quantity would move the number the
+// contribution recorded, and withdraw would then subtract something other than what apply
+// added. Nothing recomputes the aggregate, so the skew would be permanent.
+func TestAllocatedStateTrackerConsumedCapacityIsCopied(t *testing.T) {
+	featuretesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DRAConsumableCapacity, true)
+
+	// Too large for int64, so resource.Quantity keeps it as an inf.Dec behind a pointer.
+	const decFormQuantity = "100000000000000000000"
+
+	result := dedicatedResult("driver", "pool", "dev-1")
+	result.ShareID = ptr.To(types.UID("share-a"))
+	result.ConsumedCapacity = map[resourceapi.QualifiedName]resource.Quantity{
+		"memory": resource.MustParse(decFormQuantity),
+	}
+	claim := allocatedStateTestClaim("default", "shared", allocationForDevices(result))
+
+	snapshot := NewSnapshot(map[ResourceClaimId]*resourceapi.ResourceClaim{GetClaimId(claim): claim}, nil, nil, nil)
+	// Build the state, so the claim's capacity is recorded as a contribution.
+	assertStateMatchesReference(t, snapshot, "initial")
+
+	// Mutate the claim's quantity in place, the way an update rewriting the claim would.
+	// Quantity.Add on a decimal-form value writes through the shared inf.Dec pointer.
+	stored, found := snapshot.getResourceClaim(GetClaimId(claim))
+	if !found {
+		t.Fatalf("getResourceClaim(): claim not found")
+	}
+	capacity := stored.Status.Allocation.Devices.Results[0].ConsumedCapacity
+	quantity := capacity["memory"]
+	quantity.Add(resource.MustParse(decFormQuantity))
+	capacity["memory"] = quantity
+
+	// Withdrawing has to remove exactly what was added, leaving nothing behind.
+	snapshot.deleteResourceClaim(GetClaimId(claim))
+
 	state, err := snapshot.ResourceClaims().GatherAllocatedState()
 	if err != nil {
 		t.Fatalf("GatherAllocatedState(): %v", err)
 	}
-	if want := structured.MakeDeviceID("driver", "pool", "dev-1"); !state.AllocatedDevices.Has(want) {
-		t.Errorf("GatherAllocatedState(): device %v missing from %v", want, state.AllocatedDevices)
+	if len(state.AggregatedCapacity) != 0 {
+		t.Errorf("AggregatedCapacity should be empty once the only claim is gone, got %v", state.AggregatedCapacity)
 	}
+}
+
+// TestAllocatedStateTrackerRecoversFromBorrowedCollectionWrite drives the tripwire in
+// verifyNotModified: a consumer writes through a borrowed collection, and the next write to
+// the snapshot has to notice and rebuild rather than carry the corruption forever.
+//
+// The borrow is what makes this reachable at all - see "Borrowed collections" in
+// snapshot_claim_tracker.go. Nothing in fwk.ResourceClaimTracker forbids a consumer from
+// doing this, so the tracker cannot assume it never happens.
+func TestAllocatedStateTrackerRecoversFromBorrowedCollectionWrite(t *testing.T) {
+	first := allocatedStateTestClaim("default", "first", allocationForDevices(dedicatedResult("driver", "pool", "dev-1")))
+	second := allocatedStateTestClaim("default", "second", allocationForDevices(dedicatedResult("driver", "pool", "dev-2")))
+	snapshot := NewSnapshot(map[ResourceClaimId]*resourceapi.ResourceClaim{
+		GetClaimId(first):  first,
+		GetClaimId(second): second,
+	}, nil, nil, nil)
+	assertStateMatchesReference(t, snapshot, "initial")
+
+	// Borrow the state and write a device into it that no claim reports, the way a consumer
+	// treating it as its own scratch space would.
+	borrowed, err := snapshot.ResourceClaims().ListAllAllocatedDevices()
+	if err != nil {
+		t.Fatalf("ListAllAllocatedDevices(): %v", err)
+	}
+	borrowed.Insert(structured.MakeDeviceID("driver", "pool", "not-really-allocated"))
+
+	// Any write to the snapshot now has to notice the size no longer matches and drop the
+	// maintained state.
+	third := allocatedStateTestClaim("default", "third", allocationForDevices(dedicatedResult("driver", "pool", "dev-3")))
+	if err := snapshot.AddClaims([]*resourceapi.ResourceClaim{third}); err != nil {
+		t.Fatalf("AddClaims(): %v", err)
+	}
+	if snapshot.allocatedState.isBuilt() {
+		t.Errorf("the tracker should have dropped its state after a borrowed collection was written to")
+	}
+
+	// The rebuild has to agree with the claims again, with the stray device gone and the
+	// claim added while the state was dropped picked up.
+	assertStateMatchesReference(t, snapshot, "after the write through the borrowed set")
+	if stray := structured.MakeDeviceID("driver", "pool", "not-really-allocated"); deviceAllocated(t, snapshot, stray) {
+		t.Errorf("device %v was never allocated by a claim and should not survive the rebuild", stray)
+	}
+	if want := structured.MakeDeviceID("driver", "pool", "dev-3"); !deviceAllocated(t, snapshot, want) {
+		t.Errorf("device %v was added while the state was dropped and should be picked up by the rebuild", want)
+	}
+}
+
+// deviceAllocated reads the currently allocated devices out of the snapshot and reports
+// whether deviceID is among them.
+//
+// The state has to be re-read after every write: GatherAllocatedState borrows the snapshot's
+// own collections, so a value fetched before a write is not a live view of what comes after
+// it, and holding one across a write is exactly what the method documents callers must not
+// do.
+func deviceAllocated(t *testing.T, snapshot *Snapshot, deviceID structured.DeviceID) bool {
+	t.Helper()
+
+	state, err := snapshot.ResourceClaims().GatherAllocatedState()
+	if err != nil {
+		t.Fatalf("GatherAllocatedState(): %v", err)
+	}
+	return state.AllocatedDevices.Has(deviceID)
 }
 
 // TestAllocatedStateTrackerDuplicateDevice checks the reference counting: a device claimed by
@@ -312,21 +474,17 @@ func TestAllocatedStateTrackerDuplicateDevice(t *testing.T) {
 	}, nil, nil, nil)
 
 	deviceID := structured.MakeDeviceID("driver", "pool", "dev-1")
-	state, err := snapshot.ResourceClaims().GatherAllocatedState()
-	if err != nil {
-		t.Fatalf("GatherAllocatedState(): %v", err)
-	}
-	if !state.AllocatedDevices.Has(deviceID) {
+	if !deviceAllocated(t, snapshot, deviceID) {
 		t.Fatalf("device %v should be allocated", deviceID)
 	}
 
 	snapshot.deleteResourceClaim(GetClaimId(first))
-	if !state.AllocatedDevices.Has(deviceID) {
+	if !deviceAllocated(t, snapshot, deviceID) {
 		t.Errorf("device %v should still be allocated while the second claim holds it", deviceID)
 	}
 
 	snapshot.deleteResourceClaim(GetClaimId(second))
-	if state.AllocatedDevices.Has(deviceID) {
+	if deviceAllocated(t, snapshot, deviceID) {
 		t.Errorf("device %v should be released once no claim holds it", deviceID)
 	}
 }
@@ -371,11 +529,7 @@ func TestAllocatedStateTrackerAliasedClaim(t *testing.T) {
 	snapshot.deleteResourceClaim(GetClaimId(claim))
 	assertStateMatchesReference(t, snapshot, "after delete")
 
-	state, err := snapshot.ResourceClaims().GatherAllocatedState()
-	if err != nil {
-		t.Fatalf("GatherAllocatedState(): %v", err)
-	}
-	if deviceID := structured.MakeDeviceID("driver", "pool", "dev-1"); state.AllocatedDevices.Has(deviceID) {
+	if deviceID := structured.MakeDeviceID("driver", "pool", "dev-1"); deviceAllocated(t, snapshot, deviceID) {
 		t.Errorf("device %v should be released once the aliased claim is gone", deviceID)
 	}
 }

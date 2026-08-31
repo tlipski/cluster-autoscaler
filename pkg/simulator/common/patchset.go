@@ -222,12 +222,17 @@ func (p *PatchSet[K, V]) InCurrentPatch(key K) bool {
 	return found
 }
 
-// WalkCurrentPatchKeys calls f for every key modified or deleted in the topmost patch
-// layer, stopping early if f returns false. These are exactly the keys whose effective
-// value can change when the layer is reverted, which lets callers maintaining state
-// derived from the PatchSet refresh only what a Revert affects.
+// WalkCurrentPatchKeys calls f for every key whose effective value a Revert would change,
+// stopping early if f returns false. That lets callers maintaining state derived from the
+// PatchSet refresh only what a Revert affects.
+//
+// Those keys are the ones modified or deleted in the topmost patch layer, but only when
+// there is a layer below it to fall back to. Revert keeps the bottom layer, so at that
+// depth it changes nothing and this walks nothing - the guard here is the same one Revert
+// uses, and it has to stay that way. Without it the walk would hand back every key in the
+// base layer for a Revert that is about to be a no-op.
 func (p *PatchSet[K, V]) WalkCurrentPatchKeys(f func(K) bool) {
-	if len(p.patches) == 0 {
+	if len(p.patches) <= 1 {
 		return
 	}
 

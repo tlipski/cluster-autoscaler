@@ -695,9 +695,12 @@ func TestPatchSetWalkCurrentPatchKeys(t *testing.T) {
 			patchLayers: []map[string]*int{},
 			wantKeys:    map[string]bool{},
 		},
-		"SingleLayer": {
+		// Revert keeps the bottom layer, so at this depth it changes nothing and there is
+		// nothing to walk. Reporting the layer's keys here would hand a caller every key in
+		// the PatchSet to refresh for a Revert that is about to be a no-op.
+		"SingleLayer_NothingToRevert": {
 			patchLayers: []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2)}},
-			wantKeys:    map[string]bool{"a": true, "b": true},
+			wantKeys:    map[string]bool{},
 		},
 		"TopLayerEmpty": {
 			patchLayers: []map[string]*int{
