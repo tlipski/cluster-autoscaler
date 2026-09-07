@@ -130,6 +130,15 @@ func (n *NodeInfo) Snapshot() schedulerinterface.NodeInfo {
 	if n == nil {
 		return nil
 	}
+	return n.SnapshotTyped()
+}
+
+// SnapshotTyped is Snapshot, keeping the concrete *NodeInfo type. CA code should prefer it,
+// so that it doesn't have to assert the type back out of the scheduler interface.
+func (n *NodeInfo) SnapshotTyped() *NodeInfo {
+	if n == nil {
+		return nil
+	}
 	return &NodeInfo{
 		NodeInfo:            n.NodeInfo.Snapshot().(*schedulerimpl.NodeInfo),
 		LocalResourceSlices: append([]*resourceapi.ResourceSlice(nil), n.LocalResourceSlices...),

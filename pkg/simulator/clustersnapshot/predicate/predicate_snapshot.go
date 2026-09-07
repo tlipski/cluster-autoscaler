@@ -176,24 +176,12 @@ func (s *PredicateSnapshot) GetNodeInfo(nodeName string) (*framework.NodeInfo, e
 }
 
 // ListNodeInfos returns internal NodeInfos wrapping all schedulerimpl.NodeInfos in the snapshot.
+// The returned slice is owned by the underlying store, and must be treated as read-only.
 //
 // TODO(DRA): Beware that it may return stale ResourceClaim data.
 // See PodInfo.NeededResourceClaims comment.
 func (s *PredicateSnapshot) ListNodeInfos() ([]*framework.NodeInfo, error) {
-	schedNodeInfos, err := s.ClusterSnapshotStore.NodeInfos().List()
-	if err != nil {
-		return nil, err
-	}
-	var result []*framework.NodeInfo
-	for _, schedNodeInfo := range schedNodeInfos {
-		nodeInfo, ok := schedNodeInfo.(*framework.NodeInfo)
-		if !ok {
-			return nil, fmt.Errorf("expected: %T, got: %T in the underlying store", &framework.NodeInfo{}, schedNodeInfo)
-		}
-
-		result = append(result, nodeInfo)
-	}
-	return result, nil
+	return s.ClusterSnapshotStore.ListNodeInfos()
 }
 
 // AddNodeInfo adds the provided internal NodeInfo to the snapshot.

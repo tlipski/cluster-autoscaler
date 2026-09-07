@@ -62,7 +62,7 @@ func BenchmarkBuildNodeInfoList(b *testing.B) {
 			}
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				list := deltaStore.data.buildNodeInfoList()
+				list, _ := deltaStore.data.buildNodeInfoList()
 				assert.Equal(b, tc.nodeCount+1000, len(list))
 			}
 		})
@@ -79,7 +79,7 @@ func BenchmarkBuildNodeInfoList(b *testing.B) {
 			}
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				list := deltaStore.data.buildNodeInfoList()
+				list, _ := deltaStore.data.buildNodeInfoList()
 				assert.Equal(b, tc.nodeCount, len(list))
 			}
 		})

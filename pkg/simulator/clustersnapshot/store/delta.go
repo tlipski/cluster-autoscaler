@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	schedulingv1alpha3 "k8s.io/api/scheduling/v1alpha3"
 	schedulingv1beta1 "k8s.io/api/scheduling/v1beta1"
@@ -72,11 +73,23 @@ type deltaSnapshotCompositePodGroupLister DeltaSnapshotStore
 type internalDeltaSnapshotData struct {
 	baseData *internalDeltaSnapshotData
 
-	addedNodeInfoMap    map[string]schedulerinterface.NodeInfo
-	modifiedNodeInfoMap map[string]schedulerinterface.NodeInfo
+	addedNodeInfoMap    map[string]*framework.NodeInfo
+	modifiedNodeInfoMap map[string]*framework.NodeInfo
 	deletedNodeInfos    map[string]bool
 
-	nodeInfoList                                  []schedulerinterface.NodeInfo
+	nodeInfoList []*framework.NodeInfo
+	// nodeInfoListBuilt tells nodeInfoList == nil (not built yet) apart from an empty
+	// list that has been built.
+	nodeInfoListBuilt bool
+	// nodeInfoListAliased records that nodeInfoList shares its backing array with the
+	// base layer's list. Its capacity is capped to its length, so appends reallocate;
+	// overwriting an element needs an explicit ownNodeInfoList() first.
+	nodeInfoListAliased bool
+	// schedNodeInfoList is the scheduler-typed view of nodeInfoList. Converting between
+	// the two slice types needs a fresh slice, so it's built only if a scheduler plugin
+	// actually lists nodes, and invalidated whenever nodeInfoList changes.
+	schedNodeInfoList []schedulerinterface.NodeInfo
+
 	havePodsWithAffinity                          []schedulerinterface.NodeInfo
 	havePodsWithRequiredAntiAffinity              []schedulerinterface.NodeInfo
 	havePodsWithRequiredNonHostScopedAntiAffinity []schedulerinterface.NodeInfo
@@ -85,13 +98,13 @@ type internalDeltaSnapshotData struct {
 
 func newInternalDeltaSnapshotData() *internalDeltaSnapshotData {
 	return &internalDeltaSnapshotData{
-		addedNodeInfoMap:    make(map[string]schedulerinterface.NodeInfo),
-		modifiedNodeInfoMap: make(map[string]schedulerinterface.NodeInfo),
+		addedNodeInfoMap:    make(map[string]*framework.NodeInfo),
+		modifiedNodeInfoMap: make(map[string]*framework.NodeInfo),
 		deletedNodeInfos:    make(map[string]bool),
 	}
 }
 
-func (data *internalDeltaSnapshotData) getNodeInfo(name string) (schedulerinterface.NodeInfo, bool) {
+func (data *internalDeltaSnapshotData) getNodeInfo(name string) (*framework.NodeInfo, bool) {
 	if data == nil {
 		return nil, false
 	}
@@ -104,7 +117,7 @@ func (data *internalDeltaSnapshotData) getNodeInfo(name string) (schedulerinterf
 	return data.baseData.getNodeInfo(name)
 }
 
-func (data *internalDeltaSnapshotData) getNodeInfoLocal(name string) (schedulerinterface.NodeInfo, bool) {
+func (data *internalDeltaSnapshotData) getNodeInfoLocal(name string) (*framework.NodeInfo, bool) {
 	if data == nil {
 		return nil, false
 	}
@@ -117,24 +130,73 @@ func (data *internalDeltaSnapshotData) getNodeInfoLocal(name string) (scheduleri
 	return nil, false
 }
 
-func (data *internalDeltaSnapshotData) getNodeInfoList() []schedulerinterface.NodeInfo {
+// getNodeInfoList returns the effective node list for this layer. The slice is owned by
+// the store and must be treated as read-only by callers.
+func (data *internalDeltaSnapshotData) getNodeInfoList() []*framework.NodeInfo {
 	if data == nil {
 		return nil
 	}
-	if data.nodeInfoList == nil {
-		data.nodeInfoList = data.buildNodeInfoList()
+	if !data.nodeInfoListBuilt {
+		data.nodeInfoList, data.nodeInfoListAliased = data.buildNodeInfoList()
+		data.nodeInfoListBuilt = true
 	}
 	return data.nodeInfoList
 }
 
-// Contains costly copying throughout the struct chain. Use wisely.
-func (data *internalDeltaSnapshotData) buildNodeInfoList() []schedulerinterface.NodeInfo {
+// getSchedNodeInfoList returns the node list typed for the scheduler framework's
+// NodeInfoLister.
+func (data *internalDeltaSnapshotData) getSchedNodeInfoList() []schedulerinterface.NodeInfo {
+	if data == nil {
+		return nil
+	}
+	nodeInfos := data.getNodeInfoList()
+	if data.schedNodeInfoList == nil {
+		schedNodeInfos := make([]schedulerinterface.NodeInfo, len(nodeInfos))
+		for i, nodeInfo := range nodeInfos {
+			schedNodeInfos[i] = nodeInfo
+		}
+		data.schedNodeInfoList = schedNodeInfos
+	}
+	return data.schedNodeInfoList
+}
+
+// ownNodeInfoList gives this layer a backing array of its own, so that entries can be
+// overwritten without corrupting the base layer's cached list.
+func (data *internalDeltaSnapshotData) ownNodeInfoList() {
+	if !data.nodeInfoListAliased {
+		return
+	}
+	data.nodeInfoList = slices.Clone(data.nodeInfoList)
+	data.nodeInfoListAliased = false
+}
+
+// replaceInNodeInfoList swaps the cached list entry for nodeName, leaving the rest of the
+// list intact. No-op if the list hasn't been built yet.
+func (data *internalDeltaSnapshotData) replaceInNodeInfoList(nodeName string, nodeInfo *framework.NodeInfo) {
+	if !data.nodeInfoListBuilt {
+		return
+	}
+	for i, ni := range data.nodeInfoList {
+		if ni.Node().Name != nodeName {
+			continue
+		}
+		data.ownNodeInfoList()
+		data.nodeInfoList[i] = nodeInfo
+		data.schedNodeInfoList = nil
+		return
+	}
+}
+
+// buildNodeInfoList computes the effective node list for this layer. The second return
+// value reports that the result aliases the base layer's list rather than copying it,
+// which is possible whenever this layer hasn't changed the set of nodes yet.
+func (data *internalDeltaSnapshotData) buildNodeInfoList() ([]*framework.NodeInfo, bool) {
 	baseList := data.baseData.getNodeInfoList()
 	totalLen := len(baseList) + len(data.addedNodeInfoMap)
-	var nodeInfoList []schedulerinterface.NodeInfo
+	var nodeInfoList []*framework.NodeInfo
 
 	if len(data.deletedNodeInfos) > 0 || len(data.modifiedNodeInfoMap) > 0 {
-		nodeInfoList = make([]schedulerinterface.NodeInfo, 0, totalLen)
+		nodeInfoList = make([]*framework.NodeInfo, 0, totalLen)
 		for _, bni := range baseList {
 			if data.deletedNodeInfos[bni.Node().Name] {
 				continue
@@ -145,8 +207,13 @@ func (data *internalDeltaSnapshotData) buildNodeInfoList() []schedulerinterface.
 			}
 			nodeInfoList = append(nodeInfoList, bni)
 		}
+	} else if len(data.addedNodeInfoMap) == 0 {
+		// This layer contributes nothing, so the base list is already the answer. Hand it
+		// out with its capacity capped to its length, so that a later append reallocates
+		// instead of writing into the base layer's backing array.
+		return baseList[:len(baseList):len(baseList)], true
 	} else {
-		nodeInfoList = make([]schedulerinterface.NodeInfo, len(baseList), totalLen)
+		nodeInfoList = make([]*framework.NodeInfo, len(baseList), totalLen)
 		copy(nodeInfoList, baseList)
 	}
 
@@ -154,10 +221,10 @@ func (data *internalDeltaSnapshotData) buildNodeInfoList() []schedulerinterface.
 		nodeInfoList = append(nodeInfoList, ani)
 	}
 
-	return nodeInfoList
+	return nodeInfoList, false
 }
 
-func (data *internalDeltaSnapshotData) addNodeInfo(nodeInfo schedulerinterface.NodeInfo) error {
+func (data *internalDeltaSnapshotData) addNodeInfo(nodeInfo *framework.NodeInfo) error {
 	if _, found := data.getNodeInfo(nodeInfo.Node().Name); found {
 		return fmt.Errorf("node %s already in snapshot", nodeInfo.Node().Name)
 	}
@@ -169,8 +236,12 @@ func (data *internalDeltaSnapshotData) addNodeInfo(nodeInfo schedulerinterface.N
 		data.addedNodeInfoMap[nodeInfo.Node().Name] = nodeInfo
 	}
 
-	if data.nodeInfoList != nil {
+	if data.nodeInfoListBuilt {
+		// If the list is aliased its capacity equals its length, so this reallocates and
+		// leaves the base layer's array untouched.
 		data.nodeInfoList = append(data.nodeInfoList, nodeInfo)
+		data.nodeInfoListAliased = false
+		data.schedNodeInfoList = nil
 	}
 
 	if len(nodeInfo.GetPods()) > 0 {
@@ -182,6 +253,9 @@ func (data *internalDeltaSnapshotData) addNodeInfo(nodeInfo schedulerinterface.N
 
 func (data *internalDeltaSnapshotData) clearCaches() {
 	data.nodeInfoList = nil
+	data.nodeInfoListBuilt = false
+	data.nodeInfoListAliased = false
+	data.schedNodeInfoList = nil
 	data.clearPodCaches()
 }
 
@@ -226,7 +300,7 @@ func (data *internalDeltaSnapshotData) removeNodeInfo(nodeName string) error {
 	return nil
 }
 
-func (data *internalDeltaSnapshotData) nodeInfoToModify(nodeName string) (schedulerinterface.NodeInfo, bool) {
+func (data *internalDeltaSnapshotData) nodeInfoToModify(nodeName string) (*framework.NodeInfo, bool) {
 	dni, found := data.getNodeInfoLocal(nodeName)
 	if !found {
 		if _, found := data.deletedNodeInfos[nodeName]; found {
@@ -236,7 +310,7 @@ func (data *internalDeltaSnapshotData) nodeInfoToModify(nodeName string) (schedu
 		if !found {
 			return nil, false
 		}
-		dni = bni.Snapshot()
+		dni = bni.SnapshotTyped()
 		data.modifiedNodeInfoMap[nodeName] = dni
 		data.clearCaches()
 	}
@@ -251,7 +325,6 @@ func (data *internalDeltaSnapshotData) addPodInfo(podInfo schedulerinterface.Pod
 
 	ni.AddPodInfo(podInfo)
 
-	// Maybe consider deleting from the list in the future. Maybe not.
 	data.clearCaches()
 	return nil
 }
@@ -280,7 +353,6 @@ func (data *internalDeltaSnapshotData) removePod(namespace, name, nodeName strin
 		return fmt.Errorf("pod %s/%s not in snapshot", namespace, name)
 	}
 
-	// Maybe consider deleting from the list in the future. Maybe not.
 	data.clearCaches()
 	return nil
 }
@@ -335,7 +407,7 @@ func (data *internalDeltaSnapshotData) commit() (*internalDeltaSnapshotData, err
 
 // List returns list of all node infos.
 func (snapshot *deltaSnapshotStoreNodeLister) List() ([]schedulerinterface.NodeInfo, error) {
-	return snapshot.data.getNodeInfoList(), nil
+	return snapshot.data.getSchedNodeInfoList(), nil
 }
 
 // HavePodsWithAffinityList returns list of all node infos with pods that have affinity constrints.
@@ -435,6 +507,12 @@ func (snapshot *DeltaSnapshotStore) getNodeInfo(nodeName string) (schedulerinter
 		return nil, clustersnapshot.ErrNodeNotFound
 	}
 	return node, nil
+}
+
+// ListNodeInfos returns the internal NodeInfos for all Nodes tracked in the snapshot.
+// The returned slice is owned by the store and must not be modified by the caller.
+func (snapshot *DeltaSnapshotStore) ListNodeInfos() ([]*framework.NodeInfo, error) {
+	return snapshot.data.getNodeInfoList(), nil
 }
 
 // NodeInfos returns node lister.

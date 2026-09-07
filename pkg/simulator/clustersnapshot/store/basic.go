@@ -232,6 +232,20 @@ func (snapshot *BasicSnapshotStore) StoreNodeInfo(nodeInfo *framework.NodeInfo) 
 	return snapshot.getInternalData().addNodeInfo(nodeInfo)
 }
 
+// ListNodeInfos returns the internal NodeInfos for all Nodes tracked in the snapshot.
+func (snapshot *BasicSnapshotStore) ListNodeInfos() ([]*framework.NodeInfo, error) {
+	schedNodeInfos := snapshot.getInternalData().listNodeInfos()
+	nodeInfos := make([]*framework.NodeInfo, 0, len(schedNodeInfos))
+	for _, schedNodeInfo := range schedNodeInfos {
+		nodeInfo, ok := schedNodeInfo.(*framework.NodeInfo)
+		if !ok {
+			return nil, fmt.Errorf("expected: %T, got: %T in the underlying store", &framework.NodeInfo{}, schedNodeInfo)
+		}
+		nodeInfos = append(nodeInfos, nodeInfo)
+	}
+	return nodeInfos, nil
+}
+
 // StorePodInfo adds pod to the snapshot and schedules it to given node.
 func (snapshot *BasicSnapshotStore) StorePodInfo(podInfo *framework.PodInfo, nodeName string) error {
 	return snapshot.getInternalData().addPodInfo(podInfo, nodeName)

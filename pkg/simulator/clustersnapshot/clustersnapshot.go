@@ -117,6 +117,11 @@ type ClusterSnapshotStore interface {
 	// RemovePodInfo removes the given Pod from the snapshot.
 	RemovePodInfo(namespace string, podName string, nodeName string) error
 
+	// ListNodeInfos returns the internal NodeInfos for all Nodes tracked in the snapshot.
+	// The returned slice is owned by the store and must be treated as read-only by callers.
+	// This shouldn't be used outside the clustersnapshot pkg, use ClusterSnapshot.ListNodeInfos() instead.
+	ListNodeInfos() ([]*framework.NodeInfo, error)
+
 	// StoreNodeInfo adds the given *framework.NodeInfo to the snapshot without checking scheduler predicates.
 	// This shouldn't be used outside the clustersnapshot pkg, use ClusterSnapshot.AddNodeInfo() instead.
 	StoreNodeInfo(nodeInfo *framework.NodeInfo) error
