@@ -90,10 +90,17 @@ type internalDeltaSnapshotData struct {
 	// actually lists nodes, and invalidated whenever nodeInfoList changes.
 	schedNodeInfoList []schedulerinterface.NodeInfo
 
-	havePodsWithAffinity                          []schedulerinterface.NodeInfo
-	havePodsWithRequiredAntiAffinity              []schedulerinterface.NodeInfo
-	havePodsWithRequiredNonHostScopedAntiAffinity []schedulerinterface.NodeInfo
-	pvcNamespaceMap                               map[string]int
+	// The havePodsWith* lists are subsets of nodeInfoList, and are usually empty - most
+	// clusters run no pods with (anti)affinity at all. An empty result is a valid cached
+	// answer, so each list needs its own built flag rather than relying on a nil check.
+	havePodsWithAffinity                               []schedulerinterface.NodeInfo
+	havePodsWithAffinityBuilt                          bool
+	havePodsWithRequiredAntiAffinity                   []schedulerinterface.NodeInfo
+	havePodsWithRequiredAntiAffinityBuilt              bool
+	havePodsWithRequiredNonHostScopedAntiAffinity      []schedulerinterface.NodeInfo
+	havePodsWithRequiredNonHostScopedAntiAffinityBuilt bool
+
+	pvcNamespaceMap map[string]int
 }
 
 func newInternalDeltaSnapshotData() *internalDeltaSnapshotData {
@@ -261,8 +268,11 @@ func (data *internalDeltaSnapshotData) clearCaches() {
 
 func (data *internalDeltaSnapshotData) clearPodCaches() {
 	data.havePodsWithAffinity = nil
+	data.havePodsWithAffinityBuilt = false
 	data.havePodsWithRequiredAntiAffinity = nil
+	data.havePodsWithRequiredAntiAffinityBuilt = false
 	data.havePodsWithRequiredNonHostScopedAntiAffinity = nil
+	data.havePodsWithRequiredNonHostScopedAntiAffinityBuilt = false
 	// TODO: update the cache when adding/removing pods instead of invalidating the whole cache
 	data.pvcNamespaceMap = nil
 }
@@ -413,54 +423,84 @@ func (snapshot *deltaSnapshotStoreNodeLister) List() ([]schedulerinterface.NodeI
 // HavePodsWithAffinityList returns list of all node infos with pods that have affinity constrints.
 func (snapshot *deltaSnapshotStoreNodeLister) HavePodsWithAffinityList() ([]schedulerinterface.NodeInfo, error) {
 	data := snapshot.data
-	if data.havePodsWithAffinity != nil {
+	if data.havePodsWithAffinityBuilt {
 		return data.havePodsWithAffinity, nil
 	}
 
-	nodeInfoList := snapshot.data.getNodeInfoList()
-	havePodsWithAffinityList := make([]schedulerinterface.NodeInfo, 0, len(nodeInfoList))
+	nodeInfoList := data.getNodeInfoList()
+	matching := 0
 	for _, node := range nodeInfoList {
 		if len(node.GetPodsWithAffinity()) > 0 {
-			havePodsWithAffinityList = append(havePodsWithAffinityList, node)
+			matching++
+		}
+	}
+	var havePodsWithAffinityList []schedulerinterface.NodeInfo
+	if matching > 0 {
+		havePodsWithAffinityList = make([]schedulerinterface.NodeInfo, 0, matching)
+		for _, node := range nodeInfoList {
+			if len(node.GetPodsWithAffinity()) > 0 {
+				havePodsWithAffinityList = append(havePodsWithAffinityList, node)
+			}
 		}
 	}
 	data.havePodsWithAffinity = havePodsWithAffinityList
+	data.havePodsWithAffinityBuilt = true
 	return data.havePodsWithAffinity, nil
 }
 
 // HavePodsWithRequiredAntiAffinityList returns the list of NodeInfos of nodes with pods with required anti-affinity terms.
 func (snapshot *deltaSnapshotStoreNodeLister) HavePodsWithRequiredAntiAffinityList() ([]schedulerinterface.NodeInfo, error) {
 	data := snapshot.data
-	if data.havePodsWithRequiredAntiAffinity != nil {
+	if data.havePodsWithRequiredAntiAffinityBuilt {
 		return data.havePodsWithRequiredAntiAffinity, nil
 	}
 
-	nodeInfoList := snapshot.data.getNodeInfoList()
-	havePodsWithRequiredAntiAffinityList := make([]schedulerinterface.NodeInfo, 0, len(nodeInfoList))
+	nodeInfoList := data.getNodeInfoList()
+	matching := 0
 	for _, node := range nodeInfoList {
 		if len(node.GetPodsWithRequiredAntiAffinity()) > 0 {
-			havePodsWithRequiredAntiAffinityList = append(havePodsWithRequiredAntiAffinityList, node)
+			matching++
+		}
+	}
+	var havePodsWithRequiredAntiAffinityList []schedulerinterface.NodeInfo
+	if matching > 0 {
+		havePodsWithRequiredAntiAffinityList = make([]schedulerinterface.NodeInfo, 0, matching)
+		for _, node := range nodeInfoList {
+			if len(node.GetPodsWithRequiredAntiAffinity()) > 0 {
+				havePodsWithRequiredAntiAffinityList = append(havePodsWithRequiredAntiAffinityList, node)
+			}
 		}
 	}
 	data.havePodsWithRequiredAntiAffinity = havePodsWithRequiredAntiAffinityList
+	data.havePodsWithRequiredAntiAffinityBuilt = true
 	return data.havePodsWithRequiredAntiAffinity, nil
 }
 
 // HavePodsWithRequiredNonHostScopedAntiAffinityList returns nodes containing pods that require a wider topology scan (topologyKey other than hostname).
 func (snapshot *deltaSnapshotStoreNodeLister) HavePodsWithRequiredNonHostScopedAntiAffinityList() ([]schedulerinterface.NodeInfo, error) {
 	data := snapshot.data
-	if data.havePodsWithRequiredNonHostScopedAntiAffinity != nil {
+	if data.havePodsWithRequiredNonHostScopedAntiAffinityBuilt {
 		return data.havePodsWithRequiredNonHostScopedAntiAffinity, nil
 	}
 
-	nodeInfoList := snapshot.data.getNodeInfoList()
-	havePodsWithRequiredNonHostScopedAntiAffinityList := make([]schedulerinterface.NodeInfo, 0, len(nodeInfoList))
+	nodeInfoList := data.getNodeInfoList()
+	matching := 0
 	for _, node := range nodeInfoList {
 		if len(node.GetPodsWithRequiredNonHostScopedAntiAffinity()) > 0 {
-			havePodsWithRequiredNonHostScopedAntiAffinityList = append(havePodsWithRequiredNonHostScopedAntiAffinityList, node)
+			matching++
+		}
+	}
+	var havePodsWithRequiredNonHostScopedAntiAffinityList []schedulerinterface.NodeInfo
+	if matching > 0 {
+		havePodsWithRequiredNonHostScopedAntiAffinityList = make([]schedulerinterface.NodeInfo, 0, matching)
+		for _, node := range nodeInfoList {
+			if len(node.GetPodsWithRequiredNonHostScopedAntiAffinity()) > 0 {
+				havePodsWithRequiredNonHostScopedAntiAffinityList = append(havePodsWithRequiredNonHostScopedAntiAffinityList, node)
+			}
 		}
 	}
 	data.havePodsWithRequiredNonHostScopedAntiAffinity = havePodsWithRequiredNonHostScopedAntiAffinityList
+	data.havePodsWithRequiredNonHostScopedAntiAffinityBuilt = true
 	return data.havePodsWithRequiredNonHostScopedAntiAffinity, nil
 }
 
