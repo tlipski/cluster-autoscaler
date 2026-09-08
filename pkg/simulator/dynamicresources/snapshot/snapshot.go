@@ -68,13 +68,11 @@ func (s *Snapshot) allocationTracker() *allocatedStateTracker {
 	return s.allocatedState
 }
 
-// walkResourceClaims iterates over all effective ResourceClaims in the Snapshot.
+// walkResourceClaims iterates over all effective ResourceClaims in the Snapshot,
+// stopping early if f returns false. It reads them in place, without collecting them
+// into a slice first.
 func (s *Snapshot) walkResourceClaims(f func(*resourceapi.ResourceClaim) bool) {
-	for _, claim := range s.listResourceClaims() {
-		if !f(claim) {
-			return
-		}
-	}
+	s.resourceClaims.WalkValues(f)
 }
 
 // setResourceClaim adds or updates a ResourceClaim in the current patch layer, keeping the
@@ -102,25 +100,19 @@ func NewSnapshot(claims map[ResourceClaimId]*resourceapi.ResourceClaim, nodeLoca
 	maps.Copy(slices, nodeLocalSlices)
 	slices[nonNodeLocalResourceSlicesIdentifier] = nonNodeLocalSlices
 
-	claimsPatch := common.NewPatchFromMap(claims)
-	slicesPatch := common.NewPatchFromMap(slices)
-	devicesPatch := common.NewPatchFromMap(deviceClasses)
 	return &Snapshot{
-		resourceClaims: common.NewPatchSet(claimsPatch),
-		resourceSlices: common.NewPatchSet(slicesPatch),
-		deviceClasses:  common.NewPatchSet(devicesPatch),
+		resourceClaims: common.NewPatchSetFromMap(claims),
+		resourceSlices: common.NewPatchSetFromMap(slices),
+		deviceClasses:  common.NewPatchSetFromMap(deviceClasses),
 	}
 }
 
 // NewEmptySnapshot returns a zero initialized Snapshot.
 func NewEmptySnapshot() *Snapshot {
-	claimsPatch := common.NewPatch[ResourceClaimId, *resourceapi.ResourceClaim]()
-	slicesPatch := common.NewPatch[string, []*resourceapi.ResourceSlice]()
-	devicesPatch := common.NewPatch[string, *resourceapi.DeviceClass]()
 	return &Snapshot{
-		resourceClaims: common.NewPatchSet(claimsPatch),
-		resourceSlices: common.NewPatchSet(slicesPatch),
-		deviceClasses:  common.NewPatchSet(devicesPatch),
+		resourceClaims: common.NewPatchSet[ResourceClaimId, *resourceapi.ResourceClaim](),
+		resourceSlices: common.NewPatchSet[string, []*resourceapi.ResourceSlice](),
+		deviceClasses:  common.NewPatchSet[string, *resourceapi.DeviceClass](),
 	}
 }
 
@@ -329,24 +321,18 @@ func (s *Snapshot) Fork() {
 
 // listDeviceClasses retrieves all effective DeviceClasses from the snapshot.
 func (s *Snapshot) listDeviceClasses() []*resourceapi.DeviceClass {
-	deviceClasses := s.deviceClasses.AsMap()
-	deviceClassesList := make([]*resourceapi.DeviceClass, 0, len(deviceClasses))
-	for _, class := range deviceClasses {
-		deviceClassesList = append(deviceClassesList, class)
-	}
-
-	return deviceClassesList
+	return s.deviceClasses.ListValues()
 }
 
 // listResourceClaims retrieves all effective ResourceClaims from the snapshot.
 func (s *Snapshot) listResourceClaims() []*resourceapi.ResourceClaim {
-	claims := s.resourceClaims.AsMap()
-	claimsList := make([]*resourceapi.ResourceClaim, 0, len(claims))
-	for _, claim := range claims {
-		claimsList = append(claimsList, claim)
-	}
+	return s.resourceClaims.ListValues()
+}
 
-	return claimsList
+// walkDeviceClasses iterates over all effective DeviceClasses in the snapshot,
+// stopping early if f returns false.
+func (s *Snapshot) walkDeviceClasses(f func(*resourceapi.DeviceClass) bool) {
+	s.deviceClasses.WalkValues(f)
 }
 
 // configureResourceClaim updates or adds a ResourceClaim in the current patch layer.
@@ -363,11 +349,13 @@ func (s *Snapshot) getResourceClaim(claimId ResourceClaimId) (*resourceapi.Resou
 
 // listResourceSlices retrieves all effective ResourceSlices from the snapshot.
 func (s *Snapshot) listResourceSlices() []*resourceapi.ResourceSlice {
-	resourceSlices := s.resourceSlices.AsMap()
-	resourceSlicesList := make([]*resourceapi.ResourceSlice, 0, len(resourceSlices))
-	for _, nodeSlices := range resourceSlices {
+	// The PatchSet holds one slice per Node, so the result is longer than the number
+	// of entries. Sizing for one slice per Node still saves most of the regrowth.
+	resourceSlicesList := make([]*resourceapi.ResourceSlice, 0, s.resourceSlices.Len())
+	s.resourceSlices.WalkValues(func(nodeSlices []*resourceapi.ResourceSlice) bool {
 		resourceSlicesList = append(resourceSlicesList, nodeSlices...)
-	}
+		return true
+	})
 
 	return resourceSlicesList
 }
