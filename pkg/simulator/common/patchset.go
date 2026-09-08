@@ -57,11 +57,17 @@ type PatchSet[K comparable, V any] struct {
 	// top is the mutable view of the topmost layer, and the only layer that accepts
 	// writes. It supersedes stack[len(stack)-1], which is that layer's state as of
 	// the last Fork or Commit.
+	//
+	// Nil until the topmost layer is first written to. A layer that is forked and then
+	// reverted without a write in between - the common case when a scheduling attempt
+	// finds nothing to place - never allocates one, and reads fall through to
+	// stack[len(stack)-1], which is still that layer's state.
 	top *transientMap[K, V]
 
 	// writes records, per layer, the keys written in that layer and whether the write
 	// was a deletion. It is only what InCurrentPatch and WalkCurrentPatchKeys report
 	// on - reads never consult it, because each layer already holds its full state.
+	// Each entry is nil until that layer is first written to.
 	//
 	// writes[0] is always nil. Every key in the base layer was written there by
 	// definition, so the layer's own contents answer the question, and materialising a
@@ -69,6 +75,43 @@ type PatchSet[K comparable, V any] struct {
 	// proportional to the whole cluster to answer a question about the base layer that
 	// no caller has reason to ask - see WalkCurrentPatchKeys.
 	writes []map[K]bool
+}
+
+// current returns the state of the topmost layer, whether or not it has been written
+// to since it was last frozen.
+func (p *PatchSet[K, V]) current() readableMap[K, V] {
+	if p.top != nil {
+		return p.top
+	}
+	return p.stack[len(p.stack)-1]
+}
+
+// mutable returns the topmost layer as a transient, creating it on the first write to
+// that layer.
+func (p *PatchSet[K, V]) mutable() *transientMap[K, V] {
+	if p.top == nil {
+		p.top = p.stack[len(p.stack)-1].AsTransient()
+	}
+	return p.top
+}
+
+// freezeTop folds any writes made to the topmost layer back into the stack, leaving the
+// layer's state immutable and shareable. A layer that was never written to is already
+// in that state.
+func (p *PatchSet[K, V]) freezeTop() *persistentMap[K, V] {
+	if p.top != nil {
+		p.stack[len(p.stack)-1] = p.top.Persistent()
+		p.top = nil
+	}
+	return p.stack[len(p.stack)-1]
+}
+
+// readableMap is the read surface shared by a frozen layer and a layer being written to.
+type readableMap[K comparable, V any] interface {
+	Load(key K) (V, bool)
+	Len() int
+	Range(f func(K, V) bool)
+	ToNativeMap() map[K]V
 }
 
 // NewPatchSet creates a new PatchSet, initializing it with the provided base patches.
@@ -90,7 +133,6 @@ func NewPatchSet[K comparable, V any](patches ...*Patch[K, V]) *PatchSet[K, V] {
 
 	return &PatchSet[K, V]{
 		stack:  stack,
-		top:    stack[len(stack)-1].AsTransient(),
 		writes: writes,
 	}
 }
@@ -104,16 +146,13 @@ func NewPatchSetFromMap[K comparable, V any](source map[K]V) *PatchSet[K, V] {
 	base := newPersistentMapFromNativeMap(source)
 	return &PatchSet[K, V]{
 		stack:  []*persistentMap[K, V]{base},
-		top:    base.AsTransient(),
 		writes: []map[K]bool{nil},
 	}
 }
 
 func newEmptyPatchSet[K comparable, V any]() *PatchSet[K, V] {
-	base := &persistentMap[K, V]{}
 	return &PatchSet[K, V]{
-		stack:  []*persistentMap[K, V]{base},
-		top:    base.AsTransient(),
+		stack:  []*persistentMap[K, V]{{}},
 		writes: []map[K]bool{nil},
 	}
 }
@@ -149,15 +188,13 @@ func patchWrites[K comparable, V any](patch *Patch[K, V]) map[K]bool {
 // Fork adds a new, empty patch layer to the top of the stack.
 // Subsequent modifications will be recorded in this new layer.
 func (p *PatchSet[K, V]) Fork() {
-	// Freezing the transient hands back an immutable state that the new layer can be
-	// forked from and that a Revert can restore, and stops the layer being forked from
-	// accepting further writes through the old view.
-	frozen := p.top.Persistent()
-	p.stack[len(p.stack)-1] = frozen
+	// Freezing hands back an immutable state that the new layer can be forked from and
+	// that a Revert can restore, and stops the layer being forked from accepting
+	// further writes through the old view.
+	frozen := p.freezeTop()
 
 	p.stack = append(p.stack, frozen)
-	p.top = frozen.AsTransient()
-	p.writes = append(p.writes, map[K]bool{})
+	p.writes = append(p.writes, nil)
 }
 
 // Commit merges the topmost patch layer into the one below it.
@@ -167,7 +204,7 @@ func (p *PatchSet[K, V]) Commit() {
 		return
 	}
 
-	frozen := p.top.Persistent()
+	frozen := p.freezeTop()
 	top := len(p.stack) - 1
 
 	// The merged state becomes the layer below, which is exactly what the reads that
@@ -178,15 +215,16 @@ func (p *PatchSet[K, V]) Commit() {
 	// The keys written in the dropped layer were written in the layer that absorbs it,
 	// which is what the next Revert would have to undo. Skipped for the base layer,
 	// which does not track its writes.
-	if top-1 > 0 {
+	if top-1 > 0 && len(p.writes[top]) > 0 {
+		if p.writes[top-1] == nil {
+			p.writes[top-1] = make(map[K]bool, len(p.writes[top]))
+		}
 		below := p.writes[top-1]
 		for key, deleted := range p.writes[top] {
 			below[key] = deleted
 		}
 	}
 	p.writes = p.writes[:top]
-
-	p.top = frozen.AsTransient()
 }
 
 // Revert removes the topmost patch layer.
@@ -200,15 +238,15 @@ func (p *PatchSet[K, V]) Revert() {
 	// mutated nodes its own edit session allocated - anything inherited from the layer
 	// below was copied before being written to - so the state being restored cannot
 	// have been touched by it.
+	p.top = nil
 	p.stack = p.stack[:len(p.stack)-1]
 	p.writes = p.writes[:len(p.writes)-1]
-	p.top = p.stack[len(p.stack)-1].AsTransient()
 }
 
 // FindValue returns the effective value of a key, or the zero value and false if the
 // key is deleted or not present.
 func (p *PatchSet[K, V]) FindValue(key K) (value V, found bool) {
-	return p.top.Load(key)
+	return p.current().Load(key)
 }
 
 // AsMap returns the current effective state as a plain map.
@@ -216,14 +254,15 @@ func (p *PatchSet[K, V]) FindValue(key K) (value V, found bool) {
 // The map is freshly built and owned by the caller. Callers that only need to read the
 // contents should prefer WalkValues or ListValues, which do not build it.
 func (p *PatchSet[K, V]) AsMap() map[K]V {
-	return p.top.ToNativeMap()
+	return p.current().ToNativeMap()
 }
 
 // ListValues returns the effective values in the PatchSet, in no particular order.
 // Unlike AsMap it does not build an intermediate map to iterate over.
 func (p *PatchSet[K, V]) ListValues() []V {
-	values := make([]V, 0, p.top.Len())
-	p.top.Range(func(_ K, value V) bool {
+	current := p.current()
+	values := make([]V, 0, current.Len())
+	current.Range(func(_ K, value V) bool {
 		values = append(values, value)
 		return true
 	})
@@ -234,30 +273,39 @@ func (p *PatchSet[K, V]) ListValues() []V {
 // WalkValues calls f for every effective value in the PatchSet, stopping early if f
 // returns false. Unlike AsMap it does not build an intermediate map to iterate over.
 func (p *PatchSet[K, V]) WalkValues(f func(V) bool) {
-	p.top.Range(func(_ K, value V) bool {
+	p.current().Range(func(_ K, value V) bool {
 		return f(value)
 	})
 }
 
 // Len returns the number of keys with an effective value in the PatchSet.
 func (p *PatchSet[K, V]) Len() int {
-	return p.top.Len()
+	return p.current().Len()
 }
 
 // SetCurrent adds or updates a key-value pair in the topmost patch layer.
 func (p *PatchSet[K, V]) SetCurrent(key K, value V) {
-	p.top.Store(key, value)
-	if current := p.currentWrites(); current != nil {
-		current[key] = false
-	}
+	p.mutable().Store(key, value)
+	p.recordWrite(key, false)
 }
 
 // DeleteCurrent marks a key as deleted in the topmost patch layer.
 func (p *PatchSet[K, V]) DeleteCurrent(key K) {
-	p.top.Delete(key)
-	if current := p.currentWrites(); current != nil {
-		current[key] = true
+	p.mutable().Delete(key)
+	p.recordWrite(key, true)
+}
+
+// recordWrite notes that a key was written in the topmost layer. The base layer keeps
+// no record - see the writes field.
+func (p *PatchSet[K, V]) recordWrite(key K, deleted bool) {
+	top := len(p.writes) - 1
+	if top == 0 {
+		return
 	}
+	if p.writes[top] == nil {
+		p.writes[top] = map[K]bool{}
+	}
+	p.writes[top][key] = deleted
 }
 
 // InCurrentPatch reports whether the key was set in the topmost patch layer. A key
@@ -267,13 +315,12 @@ func (p *PatchSet[K, V]) DeleteCurrent(key K) {
 // On an unforked PatchSet the topmost layer is the base layer, where every key present
 // was set by definition, so this reports whether the key has an effective value.
 func (p *PatchSet[K, V]) InCurrentPatch(key K) bool {
-	current := p.currentWrites()
-	if current == nil {
-		_, found := p.top.Load(key)
+	if !p.IsForked() {
+		_, found := p.current().Load(key)
 		return found
 	}
 
-	deleted, written := current[key]
+	deleted, written := p.writes[len(p.writes)-1][key]
 	return written && !deleted
 }
 
@@ -297,25 +344,18 @@ func (p *PatchSet[K, V]) IsForked() bool {
 // drop that one - see IsForked, which such a caller has to consult first. In that case
 // this walks every key with an effective value, which is the base layer's whole content.
 func (p *PatchSet[K, V]) WalkCurrentPatchKeys(f func(K) bool) {
-	current := p.currentWrites()
-	if current == nil {
-		p.top.Range(func(key K, _ V) bool {
+	if !p.IsForked() {
+		p.current().Range(func(key K, _ V) bool {
 			return f(key)
 		})
 		return
 	}
 
-	for key := range current {
+	for key := range p.writes[len(p.writes)-1] {
 		if !f(key) {
 			return
 		}
 	}
-}
-
-// currentWrites returns the write record of the topmost layer, or nil when that is the
-// base layer, which does not keep one.
-func (p *PatchSet[K, V]) currentWrites() map[K]bool {
-	return p.writes[len(p.writes)-1]
 }
 
 // ClonePatchSet creates a deep copy of a PatchSet object with the same patch layers
@@ -334,11 +374,11 @@ func ClonePatchSet[K comparable, V any](ps *PatchSet[K, V], cloneKey func(K) K, 
 	}
 
 	for i, layer := range ps.stack {
-		// The topmost layer's authoritative state is the transient, not the frozen
-		// entry the stack still holds for it.
+		// The topmost layer's authoritative state is the transient, when there is one -
+		// the stack still holds that layer's state as of the last freeze.
 		source := layer.Range
 		if i == len(ps.stack)-1 {
-			source = ps.top.Range
+			source = ps.current().Range
 		}
 
 		transient := (&persistentMap[K, V]{}).AsTransient()
@@ -360,6 +400,5 @@ func ClonePatchSet[K comparable, V any](ps *PatchSet[K, V], cloneKey func(K) K, 
 		cloned.writes[i] = clonedWrites
 	}
 
-	cloned.top = cloned.stack[len(cloned.stack)-1].AsTransient()
 	return cloned
 }
