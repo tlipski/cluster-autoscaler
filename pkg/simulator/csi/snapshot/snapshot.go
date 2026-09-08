@@ -35,19 +35,13 @@ type Snapshot struct {
 //
 //	{"csi-node-1": &storagev1.CSINode{}}
 func NewSnapshot(csiNodes map[string]*storagev1.CSINode) *Snapshot {
-	csiNdodePatch := common.NewPatchFromMap(csiNodes)
 	return &Snapshot{
-		csiNodes: common.NewPatchSet(csiNdodePatch),
+		csiNodes: common.NewPatchSetFromMap(csiNodes),
 	}
 }
 
 func (s *Snapshot) listCSINodes() []*storagev1.CSINode {
-	csiNodes := s.csiNodes.AsMap()
-	csiNodesList := make([]*storagev1.CSINode, 0, len(csiNodes))
-	for _, csiNode := range csiNodes {
-		csiNodesList = append(csiNodesList, csiNode)
-	}
-	return csiNodesList
+	return s.csiNodes.ListValues()
 }
 
 // CSINodes returns a CSI node lister for the snapshot.
