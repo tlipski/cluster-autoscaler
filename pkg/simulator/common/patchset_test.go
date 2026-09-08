@@ -150,27 +150,27 @@ func TestPatchSetCommit(t *testing.T) {
 	for testName, tc := range tests {
 		t.Run(testName, func(t *testing.T) {
 			ps := buildTestPatchSet(t, tc.patchLayers)
-			initialNumPatches := len(ps.patches)
+			initialNumPatches := ps.layerCount()
 
 			if currentMap := ps.AsMap(); !maps.Equal(currentMap, tc.wantMap) {
 				t.Errorf("AsMap() before any commits mismatch: got %v, want %v", currentMap, tc.wantMap)
 			}
 
 			for i := 0; i < initialNumPatches-1; i++ {
-				expectedPatchesAfterCommit := len(ps.patches) - 1
+				expectedPatchesAfterCommit := ps.layerCount() - 1
 				ps.Commit()
-				if len(ps.patches) != expectedPatchesAfterCommit {
-					t.Errorf("After commit #%d, expected %d patches, got %d", i+1, expectedPatchesAfterCommit, len(ps.patches))
+				if ps.layerCount() != expectedPatchesAfterCommit {
+					t.Errorf("After commit #%d, expected %d patches, got %d", i+1, expectedPatchesAfterCommit, ps.layerCount())
 				}
 				if currentMap := ps.AsMap(); !maps.Equal(currentMap, tc.wantMap) {
 					t.Errorf("AsMap() after commit #%d mismatch: got %v, want %v", i+1, currentMap, tc.wantMap)
 				}
 			}
 
-			if initialNumPatches > 0 && len(ps.patches) != 1 {
-				t.Errorf("Expected 1 patch after all commits, got %d", len(ps.patches))
-			} else if initialNumPatches == 0 && len(ps.patches) != 0 {
-				t.Errorf("Expected 0 patches after all commits, got %d", len(ps.patches))
+			// A PatchSet always keeps a base layer, including one built from no
+			// patches at all, so committing everything down leaves exactly one.
+			if ps.layerCount() != 1 {
+				t.Errorf("Expected 1 layer after all commits, got %d", ps.layerCount())
 			}
 		})
 	}
@@ -235,17 +235,17 @@ func TestPatchSetRevert(t *testing.T) {
 	for testName, tc := range tests {
 		t.Run(testName, func(t *testing.T) {
 			ps := buildTestPatchSet(t, tc.patchLayers)
-			patchesNumber := len(ps.patches)
+			patchesNumber := ps.layerCount()
 
 			if currentMap := ps.AsMap(); !maps.Equal(currentMap, tc.wantInitialMap) {
 				t.Errorf("AsMap() before any reverts mismatch: got %v, want %v", currentMap, tc.wantInitialMap)
 			}
 
 			for i := 0; i <= patchesNumber; i++ {
-				wantPatchesAfterRevert := len(ps.patches) - 1
+				wantPatchesAfterRevert := ps.layerCount() - 1
 				ps.Revert()
-				if len(ps.patches) != wantPatchesAfterRevert && len(ps.patches) > 1 {
-					t.Errorf("After revert #%d, expected %d patches, got %d", i+1, wantPatchesAfterRevert, len(ps.patches))
+				if ps.layerCount() != wantPatchesAfterRevert && ps.layerCount() > 1 {
+					t.Errorf("After revert #%d, expected %d patches, got %d", i+1, wantPatchesAfterRevert, ps.layerCount())
 				}
 
 				currentMap := ps.AsMap()
@@ -259,10 +259,9 @@ func TestPatchSetRevert(t *testing.T) {
 				}
 			}
 
-			if patchesNumber >= 1 && len(ps.patches) != 1 {
-				t.Errorf("Expected 1 patch after all reverts, got %d", len(ps.patches))
-			} else if patchesNumber == 0 && len(ps.patches) != 0 {
-				t.Errorf("Expected 0 patches after all reverts, got %d", len(ps.patches))
+			// Revert stops at the base layer, which is always present.
+			if ps.layerCount() != 1 {
+				t.Errorf("Expected 1 layer after all reverts, got %d", ps.layerCount())
 			}
 		})
 	}
@@ -277,8 +276,8 @@ func TestPatchSetForkRevert(t *testing.T) {
 
 	// 2. Call Fork
 	ps.Fork()
-	if len(ps.patches) != 2 {
-		t.Fatalf("Expected 2 patches after Fork(), got %d", len(ps.patches))
+	if ps.layerCount() != 2 {
+		t.Fatalf("Expected 2 patches after Fork(), got %d", ps.layerCount())
 	}
 
 	// 3. Perform some mutation operations on the new layer
@@ -288,8 +287,8 @@ func TestPatchSetForkRevert(t *testing.T) {
 
 	// 4. Call Revert
 	ps.Revert()
-	if len(ps.patches) != 1 {
-		t.Fatalf("Expected 1 patch after Revert(), got %d", len(ps.patches))
+	if ps.layerCount() != 1 {
+		t.Fatalf("Expected 1 patch after Revert(), got %d", ps.layerCount())
 	}
 
 	// 5. Compare state to the empty map
@@ -308,8 +307,8 @@ func TestPatchSetForkCommit(t *testing.T) {
 	// 2. Call Fork two times
 	ps.Fork()
 	ps.Fork()
-	if len(ps.patches) != 3 {
-		t.Fatalf("Expected 3 patches after 2xFork(), got %d", len(ps.patches))
+	if ps.layerCount() != 3 {
+		t.Fatalf("Expected 3 patches after 2xFork(), got %d", ps.layerCount())
 	}
 
 	// 3. Perform some mutation operations on the current layer
@@ -319,14 +318,14 @@ func TestPatchSetForkCommit(t *testing.T) {
 
 	// 4. Call Commit to persist changes
 	ps.Commit()
-	if len(ps.patches) != 2 {
-		t.Fatalf("Expected 1 patch after Commit(), got %d", len(ps.patches))
+	if ps.layerCount() != 2 {
+		t.Fatalf("Expected 1 patch after Commit(), got %d", ps.layerCount())
 	}
 
 	// 5. Call Revert on the empty layer
 	ps.Revert()
-	if len(ps.patches) != 1 {
-		t.Fatalf("Expected 1 patch after Revert(), got %d", len(ps.patches))
+	if ps.layerCount() != 1 {
+		t.Fatalf("Expected 1 patch after Revert(), got %d", ps.layerCount())
 	}
 
 	// 6. Compare state to the empty map
@@ -535,157 +534,6 @@ func TestPatchSetOperations(t *testing.T) {
 	}
 }
 
-func TestPatchSetCache(t *testing.T) {
-	tests := map[string]struct {
-		patchLayers     []map[string]*int
-		mutatePatchSet  func(ps *PatchSet[string, int])
-		wantCache       map[string]*int
-		wantCacheInSync bool
-	}{
-		"Initial_EmptyPatchSet": {
-			patchLayers:     []map[string]*int{},
-			mutatePatchSet:  func(ps *PatchSet[string, int]) {},
-			wantCache:       map[string]*int{},
-			wantCacheInSync: false,
-		},
-		"Initial_WithData_NoCacheAccess": {
-			patchLayers:     []map[string]*int{{"a": ptr.To(1)}},
-			mutatePatchSet:  func(ps *PatchSet[string, int]) {},
-			wantCache:       map[string]*int{},
-			wantCacheInSync: false,
-		},
-		"FindValue_PopulatesCacheForKey": {
-			patchLayers: []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2)}},
-			mutatePatchSet: func(ps *PatchSet[string, int]) {
-				ps.FindValue("a")
-			},
-			wantCache:       map[string]*int{"a": ptr.To(1)},
-			wantCacheInSync: false,
-		},
-		"FindValue_DeletedKey_PopulatesCacheWithNil": {
-			patchLayers: []map[string]*int{{"a": nil, "b": ptr.To(2)}},
-			mutatePatchSet: func(ps *PatchSet[string, int]) {
-				ps.FindValue("a")
-			},
-			wantCache:       map[string]*int{"a": nil},
-			wantCacheInSync: false,
-		},
-		"AsMap_PopulatesAndSyncsCache": {
-			patchLayers: []map[string]*int{{"a": ptr.To(1), "b": nil, "c": ptr.To(3)}},
-			mutatePatchSet: func(ps *PatchSet[string, int]) {
-				ps.AsMap()
-			},
-			wantCache:       map[string]*int{"a": ptr.To(1), "c": ptr.To(3)}, // Cache does not necessarily track deletions like 'b' key
-			wantCacheInSync: true,
-		},
-		"SetCurrent_UpdatesCache_NewKey": {
-			patchLayers: []map[string]*int{{}},
-			mutatePatchSet: func(ps *PatchSet[string, int]) {
-				ps.SetCurrent("x", 10)
-			},
-			wantCache:       map[string]*int{"x": ptr.To(10)},
-			wantCacheInSync: false,
-		},
-		"SetCurrent_UpdatesCache_OverwriteKey": {
-			patchLayers: []map[string]*int{{"x": ptr.To(5)}},
-			mutatePatchSet: func(ps *PatchSet[string, int]) {
-				ps.FindValue("x")
-				ps.SetCurrent("x", 10)
-			},
-			wantCache:       map[string]*int{"x": ptr.To(10)},
-			wantCacheInSync: false,
-		},
-		"DeleteCurrent_UpdatesCache": {
-			patchLayers: []map[string]*int{{"x": ptr.To(5)}},
-			mutatePatchSet: func(ps *PatchSet[string, int]) {
-				ps.FindValue("x")
-				ps.DeleteCurrent("x")
-			},
-			wantCache:       map[string]*int{"x": nil},
-			wantCacheInSync: false,
-		},
-		"Revert_ClearsAffectedCacheEntries_And_SetsCacheNotInSync": {
-			patchLayers: []map[string]*int{{"a": ptr.To(1)}, {"b": ptr.To(2), "a": ptr.To(11)}}, // Layer 0: a=1; Layer 1: b=2, a=11
-			mutatePatchSet: func(ps *PatchSet[string, int]) {
-				ps.FindValue("a")
-				ps.FindValue("b")
-				ps.Revert()
-			},
-			wantCache:       map[string]*int{},
-			wantCacheInSync: false,
-		},
-		"Revert_OnSyncedCache_SetsCacheNotInSync": {
-			patchLayers: []map[string]*int{{"a": ptr.To(1)}, {"b": ptr.To(2)}},
-			mutatePatchSet: func(ps *PatchSet[string, int]) {
-				ps.AsMap()
-				ps.Revert()
-			},
-			wantCache:       map[string]*int{"a": ptr.To(1)},
-			wantCacheInSync: false,
-		},
-		"Commit_DoesNotInvalidateCache_IfValuesConsistent": {
-			patchLayers: []map[string]*int{{"a": ptr.To(1)}, {"b": ptr.To(2)}},
-			mutatePatchSet: func(ps *PatchSet[string, int]) {
-				ps.FindValue("a")
-				ps.FindValue("b")
-				ps.Commit()
-			},
-			wantCache:       map[string]*int{"a": ptr.To(1), "b": ptr.To(2)},
-			wantCacheInSync: false,
-		},
-		"Commit_OnSyncedCache_KeepsCacheInSync": {
-			patchLayers: []map[string]*int{{"a": ptr.To(1)}, {"b": ptr.To(2)}},
-			mutatePatchSet: func(ps *PatchSet[string, int]) {
-				ps.AsMap()
-				ps.Commit()
-			},
-			wantCache:       map[string]*int{"a": ptr.To(1), "b": ptr.To(2)},
-			wantCacheInSync: true,
-		},
-		"Fork_DoesNotInvalidateCache": {
-			patchLayers: []map[string]*int{{"a": ptr.To(1)}},
-			mutatePatchSet: func(ps *PatchSet[string, int]) {
-				ps.FindValue("a")
-				ps.Fork()
-			},
-			wantCache:       map[string]*int{"a": ptr.To(1)},
-			wantCacheInSync: false,
-		},
-		"Fork_OnSyncedCache_KeepsCacheInSync": {
-			patchLayers: []map[string]*int{{"a": ptr.To(1)}},
-			mutatePatchSet: func(ps *PatchSet[string, int]) {
-				ps.AsMap()
-				ps.Fork()
-			},
-			wantCache:       map[string]*int{"a": ptr.To(1)},
-			wantCacheInSync: true,
-		},
-	}
-
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			ps := buildTestPatchSet(t, tc.patchLayers)
-			tc.mutatePatchSet(ps)
-
-			if !maps.EqualFunc(ps.cache, tc.wantCache, func(a, b *int) bool {
-				if a == nil && b == nil {
-					return true
-				}
-				if a == nil || b == nil {
-					return false
-				}
-				return *a == *b
-			}) {
-				t.Errorf("Cache content mismatch: got %v, want %v", ps.cache, tc.wantCache)
-			}
-
-			if ps.cacheInSync != tc.wantCacheInSync {
-				t.Errorf("cacheInSync status mismatch: got %v, want %v", ps.cacheInSync, tc.wantCacheInSync)
-			}
-		})
-	}
-}
-
 func TestPatchSetWalkCurrentPatchKeys(t *testing.T) {
 	tests := map[string]struct {
 		patchLayers []map[string]*int
@@ -807,6 +655,202 @@ func TestPatchSetWalkCurrentPatchKeysEarlyStop(t *testing.T) {
 	if visited != 1 {
 		t.Errorf("WalkCurrentPatchKeys() visited %d keys after the callback returned false, want 1", visited)
 	}
+}
+
+func TestNewPatchSetFromMap(t *testing.T) {
+	tests := map[string]map[string]int{
+		"Nil":       nil,
+		"Empty":     {},
+		"Populated": {"a": 1, "b": 2, "c": 3},
+	}
+
+	for testName, source := range tests {
+		t.Run(testName, func(t *testing.T) {
+			ps := NewPatchSetFromMap(source)
+
+			want := source
+			if want == nil {
+				want = map[string]int{}
+			}
+			if got := ps.AsMap(); !maps.Equal(got, want) {
+				t.Errorf("AsMap() mismatch: got %v, want %v", got, want)
+			}
+			if got := ps.Len(); got != len(want) {
+				t.Errorf("Len() mismatch: got %d, want %d", got, len(want))
+			}
+			if ps.IsForked() {
+				t.Error("IsForked() on a freshly built PatchSet: got true, want false")
+			}
+
+			// The source map must not be retained - writing to the PatchSet cannot
+			// show up in it, and writing to it cannot show up in the PatchSet.
+			ps.SetCurrent("added", 9)
+			if _, leaked := source["added"]; leaked {
+				t.Error("SetCurrent() wrote through to the source map")
+			}
+		})
+	}
+}
+
+// TestPatchSetInCurrentPatch covers the question ensureClaimWritable asks before
+// mutating a value in place: is this key owned by the layer being written to, or is it
+// still shared with a layer below that a Revert would restore?
+func TestPatchSetInCurrentPatch(t *testing.T) {
+	tests := map[string]struct {
+		mutate func(ps *PatchSet[string, int])
+		key    string
+		want   bool
+	}{
+		"BaseLayerKeyIsOwned": {
+			mutate: func(ps *PatchSet[string, int]) {},
+			key:    "base",
+			want:   true,
+		},
+		"BaseLayerMissingKeyIsNotOwned": {
+			mutate: func(ps *PatchSet[string, int]) {},
+			key:    "absent",
+			want:   false,
+		},
+		"InheritedKeyIsNotOwnedAfterFork": {
+			mutate: func(ps *PatchSet[string, int]) { ps.Fork() },
+			key:    "base",
+			want:   false,
+		},
+		"KeySetAfterForkIsOwned": {
+			mutate: func(ps *PatchSet[string, int]) {
+				ps.Fork()
+				ps.SetCurrent("base", 11)
+			},
+			key:  "base",
+			want: true,
+		},
+		"KeyDeletedAfterForkIsNotOwned": {
+			mutate: func(ps *PatchSet[string, int]) {
+				ps.Fork()
+				ps.DeleteCurrent("base")
+			},
+			key:  "base",
+			want: false,
+		},
+		"KeySetThenDeletedAfterForkIsNotOwned": {
+			mutate: func(ps *PatchSet[string, int]) {
+				ps.Fork()
+				ps.SetCurrent("base", 11)
+				ps.DeleteCurrent("base")
+			},
+			key:  "base",
+			want: false,
+		},
+		"OwnershipIsDroppedByRevert": {
+			mutate: func(ps *PatchSet[string, int]) {
+				ps.Fork()
+				ps.SetCurrent("base", 11)
+				ps.Revert()
+				ps.Fork()
+			},
+			key:  "base",
+			want: false,
+		},
+		"OwnershipSurvivesCommitIntoAForkedLayer": {
+			mutate: func(ps *PatchSet[string, int]) {
+				ps.Fork()
+				ps.Fork()
+				ps.SetCurrent("base", 11)
+				ps.Commit()
+			},
+			key:  "base",
+			want: true,
+		},
+	}
+
+	for testName, tc := range tests {
+		t.Run(testName, func(t *testing.T) {
+			ps := NewPatchSetFromMap(map[string]int{"base": 1})
+			tc.mutate(ps)
+
+			if got := ps.InCurrentPatch(tc.key); got != tc.want {
+				t.Errorf("InCurrentPatch(%q) = %v, want %v", tc.key, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPatchSetListAndWalkValues(t *testing.T) {
+	ps := buildTestPatchSet(t, []map[string]*int{
+		{"a": ptr.To(1), "b": ptr.To(2), "gone": ptr.To(9)},
+		{"b": ptr.To(22), "c": ptr.To(3), "gone": nil},
+	})
+
+	wantValues := map[int]bool{1: true, 22: true, 3: true}
+
+	listed := ps.ListValues()
+	if len(listed) != len(wantValues) {
+		t.Errorf("ListValues() returned %d values, want %d", len(listed), len(wantValues))
+	}
+	for _, value := range listed {
+		if !wantValues[value] {
+			t.Errorf("ListValues() returned unexpected value %d", value)
+		}
+	}
+
+	var walked int
+	ps.WalkValues(func(value int) bool {
+		walked++
+		if !wantValues[value] {
+			t.Errorf("WalkValues() yielded unexpected value %d", value)
+		}
+		return true
+	})
+	if walked != len(wantValues) {
+		t.Errorf("WalkValues() yielded %d values, want %d", walked, len(wantValues))
+	}
+
+	if got := ps.Len(); got != len(wantValues) {
+		t.Errorf("Len() = %d, want %d", got, len(wantValues))
+	}
+}
+
+func TestPatchSetWalkValuesEarlyStop(t *testing.T) {
+	ps := buildTestPatchSet(t, []map[string]*int{{"a": ptr.To(1), "b": ptr.To(2), "c": ptr.To(3)}})
+
+	var walked int
+	ps.WalkValues(func(int) bool {
+		walked++
+		return false
+	})
+
+	if walked != 1 {
+		t.Errorf("WalkValues() yielded %d values after the callback returned false, want 1", walked)
+	}
+}
+
+// TestPatchSetRevertLeavesLowerLayerIntact guards the assumption that makes Revert
+// O(1): the abandoned top layer only ever mutated nodes it allocated itself, so the
+// state it was forked from cannot have been written through.
+func TestPatchSetRevertLeavesLowerLayerIntact(t *testing.T) {
+	base := map[string]int{}
+	for i := range 512 {
+		base[string(rune('a'+i%26))+string(rune('a'+i/26))] = i
+	}
+
+	ps := NewPatchSetFromMap(base)
+	ps.Fork()
+	for key := range base {
+		ps.SetCurrent(key, -1)
+		ps.DeleteCurrent(key + "!")
+	}
+	ps.DeleteCurrent("aa")
+	ps.Revert()
+
+	if got := ps.AsMap(); !maps.Equal(got, base) {
+		t.Errorf("AsMap() after Revert did not restore the base layer: got %d keys, want %d", len(got), len(base))
+	}
+}
+
+// layerCount reports how many layers the PatchSet holds. A PatchSet always holds at
+// least one, so this never returns 0.
+func (p *PatchSet[K, V]) layerCount() int {
+	return len(p.stack)
 }
 
 func buildTestPatchSet[K comparable, V any](t *testing.T, patchLayers []map[K]*V) *PatchSet[K, V] {
